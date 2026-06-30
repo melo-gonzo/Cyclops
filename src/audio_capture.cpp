@@ -693,7 +693,12 @@ window.ep=EventPlot(document.getElementById('ep'),{
     for(const f of (window._sdFiles||[])){if(seen.has(f.num))continue;const age=(nowS-f.mtime)*1000;if(age<0||age>secs*1000)continue;out.push({age_ms:age,source:f.source,id:null,sd:f.num,rms:null,thr:null})}
     return out;
   }catch(e){return[]}},
-  onMarker:(ev,btn)=>{const L={auto:'a',http:'h',video:'v',spectral:'s'};const u=ev.id!=null?'/audio/clip?id='+ev.id:(ev.sd>=0?'/sd/file?name=clip_'+String(ev.sd).padStart(5,'0')+'_'+(L[ev.source]||'a')+'.wav':null);if(u&&window.playClip)playClip(u,btn||null)}
+  // Prefer the PERSISTENT SD file (same source the SD-clips table plays) so older
+  // events load reliably; the RAM ring only keeps the newest few clips, so playing
+  // by RAM id 404s for almost every marker. Fall back to RAM id only when the event
+  // has no SD clip (e.g. save-to-SD off). playClip(url,btn) gives the same spinner/
+  // retry/stop behavior as the tables.
+  onMarker:(ev,btn)=>{const L={auto:'a',http:'h',video:'v',spectral:'s'};const u=ev.sd>=0?'/sd/file?name=clip_'+String(ev.sd).padStart(5,'0')+'_'+(L[ev.source]||'a')+'.wav':(ev.id!=null?'/audio/clip?id='+ev.id:null);if(u&&window.playClip)playClip(u,btn||null)}
 });
 filttog.onclick=e=>{
   e.preventDefault();
