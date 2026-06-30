@@ -1,0 +1,11 @@
+# Cyclops dual-OTA layout for the XIAO ESP32S3 (8MB flash).
+# Two 3MB app slots so OTA can write the inactive slot and flip the boot pointer.
+# nvs is kept at the SAME offset/size as huge_app.csv so WiFi creds, mDNS hostname,
+# and all saved audio/camera settings SURVIVE the one-time USB re-flash to this table.
+# SPIFFS is dropped (unused: <FS.h> is only pulled in for the SD File type).
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x300000,
+app1,     app,  ota_1,   0x310000, 0x300000,
+coredump, data, coredump,0x610000, 0x10000,

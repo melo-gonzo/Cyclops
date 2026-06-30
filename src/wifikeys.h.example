@@ -1,0 +1,17 @@
+// wifikeys.h.example — copy to wifikeys.h and fill in your network.
+//
+//   cp src/wifikeys.h.example src/wifikeys.h
+//
+// This file is OPTIONAL. With src/wifikeys.h present, the network below is
+// seeded into NVS on first boot (and keeps the compiled-in static IP). Without
+// it, the device boots straight to the "Cyclops" AP so you can add a network at
+// /wifi instead. Either way, more networks can be added later at /wifi.
+//
+// src/wifikeys.h is git-ignored on purpose — it holds your WiFi PSK. NEVER
+// commit it. (This .example file is safe to commit; it has no real secrets.)
+
+#include <Arduino.h>
+
+// WiFi credentials for the initial/home network.
+const char* ssid     = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
