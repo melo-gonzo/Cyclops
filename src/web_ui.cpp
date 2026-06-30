@@ -83,9 +83,27 @@ window.EventPlot=function(host,opts){
     drawInfo();
   }
   function drawInfo(){
-    if(pinEv){const od=(pinEv.rms!=null&&pinEv.thr>0)?' · '+(pinEv.rms/pinEv.thr).toFixed(1)+'×':'';info.textContent=(pinEv.source||'event')+' #'+pinEv.id+od+' · '+fmtTs(Date.now()-pinEv.age_ms)}
-    else if(pinHi!=null&&D&&pinHi<D.length){const ago=wend()+(D.length-1-pinHi)*Bms;info.textContent=D[pinHi]+(T&&pinHi<T.length?' · thr '+T[pinHi]:'')+' · '+(ago<2000?'now':fmtTs(Date.now()-ago))}
-    else info.textContent='';
+    if(pinEv){
+      const od=(pinEv.rms!=null&&pinEv.thr>0)?' · '+(pinEv.rms/pinEv.thr).toFixed(1)+'×':'';
+      const meta=(pinEv.source||'event')+(pinEv.id!=null?' #'+pinEv.id:'')+od+' · '+fmtTs(Date.now()-pinEv.age_ms);
+      // When the host wires onMarker (audio clips), a pinned event gets a PLAY
+      // button so you can hear that clip - rebuilt only when the selection changes
+      // (keyed on id/sd) so its play/stop state survives the periodic redraw.
+      if(opts.onMarker){
+        const key=(pinEv.id!=null?'i'+pinEv.id:'s'+pinEv.sd);
+        if(info._key!==key){
+          info.innerHTML='';
+          const b=mk('button');b.innerHTML='&#9654;';b.title='play this clip';
+          b.style.cssText='background:#3d9df0;color:#fff;border:0;border-radius:6px;padding:2px 10px;margin-right:8px;cursor:pointer;font-size:.95em;vertical-align:middle';
+          b.onclick=()=>opts.onMarker(pinEv,b);
+          const s=mk('span');info.append(b,s);
+          info._key=key;info._meta=s;
+        }
+        info._meta.textContent=meta;
+      } else {info.textContent=meta;info._key=null}
+    }
+    else if(pinHi!=null&&D&&pinHi<D.length){const ago=wend()+(D.length-1-pinHi)*Bms;info.textContent=D[pinHi]+(T&&pinHi<T.length?' · thr '+T[pinHi]:'')+' · '+(ago<2000?'now':fmtTs(Date.now()-ago));info._key=null}
+    else {info.textContent='';info._key=null}
   }
   function syncSliders(){const full=plotSecs,zf=span()/full;if(document.activeElement!==zsl)zsl.value=Math.round(zf*1000);zlbl.textContent=fmtDur(span());const maxEnd=Math.max(0,(full-span())*1000);if(document.activeElement!==psl)psl.value=maxEnd>0?Math.round((1-Math.min(wend(),maxEnd)/maxEnd)*1000):1000;psl.disabled=maxEnd<=0}
   zsl.oninput=()=>{const zf=Math.max(0.01,+zsl.value/1000),sp=Math.max(60,Math.round(plotSecs*zf));const maxEnd=Math.max(0,(plotSecs-sp)*1000);_zoom={spanSecs:sp,endMs:Math.min(wend(),maxEnd)};pinHi=pinEv=null;load()};
@@ -95,7 +113,7 @@ window.EventPlot=function(host,opts){
   cv.onmousedown=e=>{drag=true;dragX0=xy(e);sel=null};
   cv.onmousemove=e=>{const x=xy(e);if(drag){sel={x0:dragX0,x1:x};render();return}};
   window.addEventListener('mouseup',e=>{if(!drag)return;drag=false;const x=xy(e);const a=Math.min(dragX0,x),b=Math.max(dragX0,x);sel=null;if(b-a>6){const W=cv.width,sp=vspan();const newSpan=Math.max(60,Math.round(sp*(b-a)/W/1000));const newEnd=Math.round(wend()+sp*(W-b)/W);_zoom={spanSecs:newSpan,endMs:newEnd};suppress=true;pinHi=pinEv=null;load()}else render()});
-  cv.onclick=e=>{if(suppress){suppress=false;return}const x=xy(e);let best=null,bd=10;for(const ev of marks){const ex=evX(ev);if(ex<0)continue;const d=Math.abs(ex-x);if(d<bd){bd=d;best=ev}}if(best){pinEv=best;pinHi=null;if(opts.onMarker)opts.onMarker(best)}else if(D){const xs=cv.width/(D.length-1);pinEv=null;pinHi=Math.max(0,Math.min(D.length-1,Math.round(x/xs)))}render()};
+  cv.onclick=e=>{if(suppress){suppress=false;return}const x=xy(e);let best=null,bd=10;for(const ev of marks){const ex=evX(ev);if(ex<0)continue;const d=Math.abs(ex-x);if(d<bd){bd=d;best=ev}}if(best){pinEv=best;pinHi=null}else if(D){const xs=cv.width/(D.length-1);pinEv=null;pinHi=Math.max(0,Math.min(D.length-1,Math.round(x/xs)))}render()};
 
   async function load(){
     try{
