@@ -461,7 +461,11 @@ function page(k,items,render,tb,nav,emptyEl){
   if(_pg[k]>maxP)_pg[k]=maxP;
   const p=_pg[k],s=p*PG;
   emptyEl.style.display=n?"none":"block";
-  tb.innerHTML=items.slice(s,s+PG).map(render).join("");
+  // Only touch the DOM when the rendered rows actually changed: assigning even an
+  // identical innerHTML recreates every element, which refetches thumbnails and
+  // restarts their lazy-load (visible as flicker on each 10s refresh).
+  const html=items.slice(s,s+PG).map(render).join("");
+  if(tb._h!==html){tb._h=html;tb.innerHTML=html}
   nav.style.display=n>PG?"flex":"none";
   nav.innerHTML=n>PG?
     "<button onclick=\"pgMove('"+k+"',-1)\""+(p?"":" disabled")+">&#8249; prev</button>"+
@@ -556,14 +560,18 @@ function ovr(rms,thr){
 // enlarged overlay. A load error retries a few times with backoff (so a transient
 // "sd busy" 503 doesn't blank it) before giving up - a genuinely missing sidecar
 // (older clips, or the camera had no frame) then just removes itself.
+const _noThumb=new Set(); // clips confirmed to have no .jpg sidecar (pre-feature
+                          // files): never re-request them, or every table rebuild
+                          // would restart the fetch-fail-retry cycle (UI flicker).
 function thumbCell(name){
   const j=encodeURIComponent(name.replace(/\.(wav|avi)$/,".jpg"));
+  if(_noThumb.has(j))return "";
   return "<img class=thumb loading=lazy alt=key data-n='"+j+"' src='/sd/file?name="+j+
     "' onerror='thumbErr(this)' onclick='this.classList.toggle(\"big\")'>";
 }
 function thumbErr(img){
   const t=(+img.dataset.t||0)+1;
-  if(t>3){img.remove();return} // no sidecar after retries: nothing to show
+  if(t>3){_noThumb.add(img.dataset.n);img.remove();return} // no sidecar: give up for good
   img.dataset.t=t;
   setTimeout(()=>{img.src="/sd/file?name="+img.dataset.n+"&r="+Date.now()},500*t);
 }
@@ -3863,6 +3871,12 @@ static void streamSdFileChunked(File &f, uint32_t size, const char *ctype,
   hdr += "\r\nContent-Length: ";
   hdr += String(size);
   hdr += "\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n";
+  // Key-frame thumbnails are immutable (a clip's .jpg sidecar is written once,
+  // and a reused clip number gets a different name only after 10k wraps): let the
+  // browser cache them so the tables' periodic re-render doesn't refetch every
+  // thumbnail from SD (which read as constant flicker/reload in the UI).
+  if (strcmp(ctype, "image/jpeg") == 0)
+    hdr += "Cache-Control: public, max-age=604800, immutable\r\n";
   if (dlName) {
     hdr += "Content-Disposition: attachment; filename=";
     hdr += dlName;
