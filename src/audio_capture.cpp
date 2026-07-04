@@ -2107,7 +2107,10 @@ static bool sdInit(int attempts = SD_MOUNT_ATTEMPTS) {
       unsigned idx = 0;
       const char *base = strrchr(entry.name(), '/');
       base = base ? base + 1 : entry.name();
-      if (sscanf(base, "clip_%u", &idx) == 1) {
+      // .wav only: the .jpg key-frame sidecars share the clip_ prefix and would
+      // otherwise be indexed as (1KB) audio clips - the video scan filters on
+      // .avi for the same reason.
+      if (sscanf(base, "clip_%u", &idx) == 1 && pathsafe::endsWith(base, ".wav")) {
         clipIndexAdd(CLIP_AUDIO, base, entry.size(), (uint32_t)entry.getLastWrite());
       }
       entry.close();
