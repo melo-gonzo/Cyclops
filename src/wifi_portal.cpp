@@ -828,7 +828,7 @@ body.viewer #vbadge{display:inline-block}
     <input type="text" id="wu" placeholder="username" style="width:120px">
     <input type="password" id="wp" placeholder="new password" autocomplete="new-password" style="flex:1;min-width:120px">
     <button class="sm" onclick="saveLogin()">save</button>
-    <button class="sm warn" id="woff" onclick="loginOff()" style="display:none">turn off</button>
+    <button class="sm warn" id="woff" onclick="loginOff(this)" style="display:none">turn off</button>
   </div>
   <div class="note" id="wstate" style="margin-top:6px"></div>
   <div class="row" style="margin-top:10px">
@@ -847,7 +847,7 @@ body.viewer #vbadge{display:inline-block}
   <div class="note" id="fwver">version: &hellip;</div>
   <div class="row" style="margin-top:8px">
     <input type="file" id="fwfile" accept=".bin" style="flex:1;min-width:160px">
-    <button class="warn" onclick="doUpdate()">upload &amp; flash</button>
+    <button class="warn" onclick="doUpdate(this)">upload &amp; flash</button>
   </div>
   <div class="row" id="fwprog" style="margin-top:8px;display:none">
     <progress id="fwbar" value="0" max="100" style="flex:1"></progress>
@@ -867,6 +867,20 @@ body.viewer #vbadge{display:inline-block}
 <script>
 const esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 const jq=s=>esc(JSON.stringify(s));
+// Inline feedback instead of alert()/confirm() popups, which several browsers
+// suppress or auto-dismiss (that made buttons look like they did nothing). All
+// status/errors go to the shared #msg line; errors are tinted red briefly.
+let _msgUntil=0;
+function _msg(t,err){const m=document.getElementById("msg");if(!m)return;m.textContent=t;m.style.color=err?"#f0776d":"";_msgUntil=Date.now()+8000;if(err)setTimeout(()=>{if(m.textContent===t)m.style.color="";},4000);}
+// Generic two-step confirm ON THE BUTTON ITSELF (same popup-free idiom as reboot):
+// first click arms it (label -> armLabel, auto-disarms after 4s), second click runs
+// fn(). No dialog to be swallowed. Pass the button via `this` from onclick.
+function arm(btn,armLabel,fn){
+  if(!btn)return fn();
+  if(btn.dataset.armed){clearTimeout(btn._armT);delete btn.dataset.armed;btn.textContent=btn.dataset.orig;fn();return;}
+  btn.dataset.orig=btn.textContent;btn.dataset.armed="1";btn.textContent=armLabel;btn.classList.add("warn");
+  btn._armT=setTimeout(()=>{if(btn.dataset.armed){delete btn.dataset.armed;btn.textContent=btn.dataset.orig;}},4000);
+}
 let _timeSent=false;
 let _authon=false;
 let _ipDirty=false;
@@ -884,7 +898,9 @@ async function st(){
     if(s.ap.up)h+="<span class='ok'>&#9679;</span> hotspot <b>"+esc(s.ap.ssid)+"</b> up at http://"+s.ap.ip
       +" &mdash; "+s.ap.stations+" device"+(s.ap.stations==1?"":"s")+" connected";
     st_.innerHTML=h;
-    msg.textContent=s.msg||"";
+    // A server status (e.g. a join error) always wins; otherwise don't clobber a
+    // recent client message (button feedback) with an empty poll result.
+    if(s.msg)_msg(s.msg); else if(Date.now()>_msgUntil)msg.textContent="";
     if(document.activeElement!==sa)sa.checked=s.standalone;
     apssid.textContent=s.ap.ssid;appass.textContent=s.ap.pass;
     if(!_ipDirty){
@@ -904,7 +920,7 @@ async function st(){
       +(n.home?" <span class='note'>(home, static IP)</span>":"")+"</td>"
       +"<td style='text-align:right'>"
       +(n.cur?"":"<button class='sm' onclick='joinSaved("+n.i+")'>connect</button> ")
-      +"<button class='sm warn' onclick='forget("+n.i+")'>forget</button></td></tr>").join("")
+      +"<button class='sm warn' onclick='forget("+n.i+",this)'>forget</button></td></tr>").join("")
       ||"<tr><td class='note'>none saved</td></tr>";
     if(!s.time_ok&&!_timeSent){_timeSent=true;fetch("/wifi/time?epoch="+Math.floor(Date.now()/1e3))}
   }catch(e){}
@@ -937,69 +953,66 @@ function addManual(){
 }
 async function add(ss,pw){
   const r=await fetch("/wifi/add?join=1&ssid="+encodeURIComponent(ss)+"&pass="+encodeURIComponent(pw));
-  if(!r.ok){alert(await r.text());return}
-  msg.textContent='joining "'+ss+'" - if you are on the camera’s hotspot it may drop for a few seconds';
+  if(!r.ok){_msg(await r.text(),true);return}
+  _msg('joining "'+ss+'" - if you are on the camera’s hotspot it may drop for a few seconds');
   st();
 }
 async function joinSaved(i){await fetch("/wifi/join?i="+i);st()}
-async function forget(i){
-  if(!confirm("Forget this network?"))return;
-  await fetch("/wifi/del?i="+i);st();
+function forget(i,btn){
+  arm(btn,"click to confirm",async()=>{await fetch("/wifi/del?i="+i);_msg("network forgotten");st();});
 }
 function ipFields(){iprow.style.display=ipst.checked?"":"none"}
 async function saveIp(){
   const on=ipst.checked?1:0;
   let u="/wifi/cfg?ipstatic="+on;
   if(on){
-    if(!ipaddr.value.trim()){alert("Enter an IP address (or uncheck Static IP for DHCP).");return}
+    if(!ipaddr.value.trim()){_msg("Enter an IP address (or uncheck Static IP for DHCP).",true);return}
     u+="&ip="+encodeURIComponent(ipaddr.value.trim())
       +"&mask="+encodeURIComponent(ipmask.value.trim())
       +"&gw="+encodeURIComponent(ipgw.value.trim())
       +"&dns="+encodeURIComponent(ipdns.value.trim());
   }
   const r=await fetch(u);
-  if(!r.ok){alert(await r.text());return}
+  if(!r.ok){_msg(await r.text(),true);return}
   _ipDirty=false;
-  msg.textContent=on?("static IP saved ("+ipaddr.value.trim()+") - applies next time it joins a network")
-                    :"switched to DHCP - applies next time it joins a network";
+  _msg(on?("static IP saved ("+ipaddr.value.trim()+") - applies next time it joins a network")
+        :"switched to DHCP - applies next time it joins a network");
 }
 async function saveHost(){
   const r=await fetch("/wifi/cfg?host="+encodeURIComponent(host.value.trim()));
-  if(!r.ok){alert(await r.text());return}
-  msg.textContent="device name saved - now reachable at http://"+host.value.trim().toLowerCase()+".local";
+  if(!r.ok){_msg(await r.text(),true);return}
+  _msg("device name saved - now reachable at http://"+host.value.trim().toLowerCase()+".local");
 }
 async function saveAp(){
   const r=await fetch("/wifi/cfg?appass="+encodeURIComponent(appw.value));
-  if(!r.ok){alert(await r.text());return}
-  msg.textContent="hotspot password saved - applies next time the hotspot starts";
+  if(!r.ok){_msg(await r.text(),true);return}
+  _msg("hotspot password saved - applies next time the hotspot starts");
 }
 async function saveLogin(){
-  if(!_authon&&!wp.value){alert("Enter a password to turn on the web login.");return}
-  if(!wu.value&&!wp.value)return;
-  if(!confirm(_authon?"Change the web login? You'll be asked to sign in again with the new credentials."
-                     :"Turn on the web login? You'll be asked to sign in with these credentials."))return;
+  if(!_authon&&!wp.value){_msg("Enter a password to turn on the web login.",true);return}
+  if(!wu.value&&!wp.value){_msg("Enter a username and password.",true);return}
   const r=await fetch("/wifi/cfg?user="+encodeURIComponent(wu.value)+"&pass="+encodeURIComponent(wp.value));
-  if(!r.ok){alert(await r.text());return}
+  if(!r.ok){_msg(await r.text(),true);return}
   wp.value="";
-  msg.textContent="login updated - sign in with the new username and password";
+  _msg("login updated - you'll be asked to sign in with the new username and password");
   st();
 }
-async function loginOff(){
-  if(!confirm("Turn off the web login? Anyone on the network will then have full control of this device."))return;
-  const r=await fetch("/wifi/cfg?authoff=1");
-  if(!r.ok){alert(await r.text());return}
-  wp.value="";
-  msg.textContent="web login turned off - this device is now passwordless";
-  st();
+async function loginOff(btn){
+  arm(btn,"click again to turn off login",async()=>{
+    const r=await fetch("/wifi/cfg?authoff=1");
+    if(!r.ok){_msg(await r.text(),true);return}
+    wp.value="";
+    _msg("web login turned off - this device is now passwordless");
+    st();
+  });
 }
 async function saveViewer(){
   const u=vu.value.trim();
-  if(u&&!vp.value){alert("Set a password for the read-only login (or clear the username to disable it).");return}
-  if(!u&&!confirm("Disable the read-only login?"))return;
+  if(u&&!vp.value){_msg("Set a password for the read-only login (or clear the username to disable it).",true);return}
   const r=await fetch("/wifi/cfg?vuser="+encodeURIComponent(u)+"&vpass="+encodeURIComponent(vp.value));
-  if(!r.ok){alert(await r.text());return}
+  if(!r.ok){_msg(await r.text(),true);return}
   vp.value="";
-  msg.textContent=u?("read-only login saved for \""+u+"\""):"read-only login disabled";
+  _msg(u?("read-only login saved for \""+u+"\""):"read-only login disabled");
   st();
 }
 // Popup-free reboot: no confirm()/alert(), no overlay. The button arms on the
@@ -1027,25 +1040,35 @@ async function reboot(){
   setTimeout(tick,4000); // let it actually go down first, then start polling
 }
 async function setSa(){
-  if(sa.checked&&!confirm("Standalone mode: the camera will stop joining WiFi and only host its hotspot \""+apssid.textContent+"\". To reach it you must connect to that network and browse to http://192.168.8.1. Continue?")){sa.checked=false;return}
-  await fetch("/wifi/mode?standalone="+(sa.checked?1:0));st();
+  await fetch("/wifi/mode?standalone="+(sa.checked?1:0));
+  _msg(sa.checked?("standalone ON - the camera now only hosts hotspot \""+apssid.textContent+"\"; reach it at http://192.168.8.1 (uncheck to rejoin WiFi)")
+                 :"standalone OFF - the camera will join your saved WiFi again");
+  st();
 }
-function doUpdate(){
+function doUpdate(btn){
   const f=fwfile.files[0];
-  if(!f){alert("Choose a firmware .bin first");return}
-  if(!confirm("Flash "+f.name+" ("+((f.size/1024)|0)+" KB) over the air? The device reboots into the new firmware."))return;
+  if(!f){_msg("Choose a firmware .bin first",true);return}
+  // Two-step arm (popup-free) instead of confirm(): first click asks to confirm,
+  // second click flashes. Guards against an accidental over-the-air reflash.
+  if(btn&&!btn.dataset.armed){
+    btn.dataset.orig=btn.textContent;btn.dataset.armed="1";
+    btn.textContent="click again to flash "+((f.size/1024)|0)+"KB";
+    btn._armT=setTimeout(()=>{if(btn.dataset.armed){delete btn.dataset.armed;btn.textContent=btn.dataset.orig;}},4000);
+    return;
+  }
+  if(btn){clearTimeout(btn._armT);delete btn.dataset.armed;btn.textContent=btn.dataset.orig||"upload & flash";}
   const fd=new FormData();fd.append("firmware",f,f.name);
   const xhr=new XMLHttpRequest();
   xhr.open("POST","/update");
   fwprog.style.display="";
   xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);fwbar.value=p;fwpct.textContent=p+"%"}};
   xhr.onload=()=>{
-    if(xhr.status==200){msg.textContent="firmware uploaded - rebooting into it...";setTimeout(()=>location.reload(),16000)}
-    else{alert("update failed: "+(xhr.responseText||("HTTP "+xhr.status)));fwprog.style.display="none"}
+    if(xhr.status==200){_msg("firmware uploaded - rebooting into it...");setTimeout(()=>location.reload(),16000)}
+    else{_msg("update failed: "+(xhr.responseText||("HTTP "+xhr.status)),true);fwprog.style.display="none"}
   };
   // The device reboots the instant the write finishes, so the socket often drops
   // before a clean 200 arrives - treat that as success-in-progress, not an error.
-  xhr.onerror=()=>{msg.textContent="upload finished - if it flashed, the device is rebooting...";setTimeout(()=>location.reload(),16000)};
+  xhr.onerror=()=>{_msg("upload finished - if it flashed, the device is rebooting...");setTimeout(()=>location.reload(),16000)};
   xhr.send(fd);
 }
 function loadFw(){fetch("/diag").then(r=>r.json()).then(d=>{if(d.fw)fwver.textContent="version: "+d.fw}).catch(()=>{})}
