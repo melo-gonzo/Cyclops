@@ -168,6 +168,86 @@ void test_plan_columns_never_exceed_request_or_avail(void) {
   TEST_ASSERT_TRUE(p.want <= 60); // fits in availability
 }
 
+// ---- resampleMaxPool: re-bucket a ring to a new cadence (window change) ----
+
+void test_resample_coarsen_pools_pairs(void) {
+  // 6 buckets @1000ms -> @2000ms: newest-aligned pairs {50,60},{30,40},{10,20}
+  uint16_t ring[8] = {10, 20, 30, 40, 50, 60, 0, 0};
+  uint16_t out[8] = {0};
+  uint32_t n = resampleMaxPool(ring, 8, 6, 6, 1000, 2000, out, 8);
+  TEST_ASSERT_EQUAL_UINT32(3, n);
+  TEST_ASSERT_EQUAL_UINT16(20, out[0]);
+  TEST_ASSERT_EQUAL_UINT16(40, out[1]);
+  TEST_ASSERT_EQUAL_UINT16(60, out[2]);
+}
+
+void test_resample_refine_replicates(void) {
+  // 2 buckets @2000ms -> @1000ms: each old peak covers two finer buckets
+  uint16_t ring[4] = {7, 9, 0, 0};
+  uint16_t out[8] = {0};
+  uint32_t n = resampleMaxPool(ring, 4, 2, 2, 2000, 1000, out, 8);
+  TEST_ASSERT_EQUAL_UINT32(4, n);
+  TEST_ASSERT_EQUAL_UINT16(7, out[0]);
+  TEST_ASSERT_EQUAL_UINT16(7, out[1]);
+  TEST_ASSERT_EQUAL_UINT16(9, out[2]);
+  TEST_ASSERT_EQUAL_UINT16(9, out[3]);
+}
+
+void test_resample_non_integer_ratio_keeps_peaks(void) {
+  // 3 buckets @1000ms -> @1500ms: span 3000ms -> 2 new buckets.
+  // newest interval [0,1500) overlaps old j=0,1 (30,20); oldest [1500,3000) overlaps j=1,2.
+  uint16_t ring[4] = {10, 20, 30, 0};
+  uint16_t out[4] = {0};
+  uint32_t n = resampleMaxPool(ring, 4, 3, 3, 1000, 1500, out, 4);
+  TEST_ASSERT_EQUAL_UINT32(2, n);
+  TEST_ASSERT_EQUAL_UINT16(20, out[0]); // max(10,20): j=1 straddles the boundary
+  TEST_ASSERT_EQUAL_UINT16(30, out[1]);
+}
+
+void test_resample_wrapped_ring(void) {
+  // w=2: newest is index 1; chronological = 30,40,10,20 (oldest..newest)
+  uint16_t ring[4] = {10, 20, 30, 40};
+  uint16_t out[4] = {0};
+  uint32_t n = resampleMaxPool(ring, 4, 2, 4, 1000, 2000, out, 4);
+  TEST_ASSERT_EQUAL_UINT32(2, n);
+  TEST_ASSERT_EQUAL_UINT16(40, out[0]); // max(30,40)
+  TEST_ASSERT_EQUAL_UINT16(20, out[1]); // max(10,20)
+}
+
+void test_resample_dstcap_keeps_newest(void) {
+  // 6 @1000 -> 6 new @1000 but dstCap=2: only the newest 2 survive
+  uint16_t ring[8] = {10, 20, 30, 40, 50, 60, 0, 0};
+  uint16_t out[2] = {0};
+  uint32_t n = resampleMaxPool(ring, 8, 6, 6, 1000, 1000, out, 2);
+  TEST_ASSERT_EQUAL_UINT32(2, n);
+  TEST_ASSERT_EQUAL_UINT16(50, out[0]);
+  TEST_ASSERT_EQUAL_UINT16(60, out[1]);
+}
+
+void test_resample_strided_per_band(void) {
+  // 4 columns of 2 bands @1000ms -> @2000ms, resampled band-by-band.
+  // Columns oldest..newest: (1,100) (2,200) (3,300) (4,400)
+  uint16_t ring[8] = {1, 100, 2, 200, 3, 300, 4, 400};
+  uint16_t out[8] = {0};
+  uint32_t n = 0;
+  for (uint32_t b = 0; b < 2; b++)
+    n = resampleMaxPool(ring, 4, 4, 4, 1000, 2000, out, 4, 2, b);
+  TEST_ASSERT_EQUAL_UINT32(2, n);
+  TEST_ASSERT_EQUAL_UINT16(2, out[0]);   // col0 band0: max(1,2)
+  TEST_ASSERT_EQUAL_UINT16(200, out[1]); // col0 band1: max(100,200)
+  TEST_ASSERT_EQUAL_UINT16(4, out[2]);   // col1 band0: max(3,4)
+  TEST_ASSERT_EQUAL_UINT16(400, out[3]); // col1 band1: max(300,400)
+}
+
+void test_resample_zero_cases(void) {
+  uint16_t ring[4] = {1, 2, 3, 4};
+  uint16_t out[4] = {0};
+  TEST_ASSERT_EQUAL_UINT32(0, resampleMaxPool(NULL, 4, 0, 4, 1000, 2000, out, 4));
+  TEST_ASSERT_EQUAL_UINT32(0, resampleMaxPool(ring, 4, 0, 0, 1000, 2000, out, 4)); // empty
+  TEST_ASSERT_EQUAL_UINT32(0, resampleMaxPool(ring, 4, 0, 4, 0, 2000, out, 4));    // bad cadence
+  TEST_ASSERT_EQUAL_UINT32(0, resampleMaxPool(ring, 4, 0, 4, 1000, 0, out, 4));
+}
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -189,5 +269,12 @@ int main(int, char **) {
   RUN_TEST(test_plan_handles_zoom_endbuckets);
   RUN_TEST(test_plan_zero_cases);
   RUN_TEST(test_plan_columns_never_exceed_request_or_avail);
+  RUN_TEST(test_resample_coarsen_pools_pairs);
+  RUN_TEST(test_resample_refine_replicates);
+  RUN_TEST(test_resample_non_integer_ratio_keeps_peaks);
+  RUN_TEST(test_resample_wrapped_ring);
+  RUN_TEST(test_resample_dstcap_keeps_newest);
+  RUN_TEST(test_resample_strided_per_band);
+  RUN_TEST(test_resample_zero_cases);
   return UNITY_END();
 }

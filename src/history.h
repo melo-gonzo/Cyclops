@@ -88,4 +88,44 @@ inline PoolPlan planAlignedPool(uint32_t want, uint32_t points, uint32_t count,
   return r;
 }
 
+// Re-bucket a ring recorded at oldMs per bucket into newMs per bucket, anchored
+// at the newest edge (the newest source bucket and the newest output bucket both
+// end "now"). Used when a retention window changes so the collected history is
+// preserved instead of wiped: coarsening (newMs > oldMs) max-pools the old
+// buckets that overlap each new one; refining (newMs < oldMs) replicates each
+// old bucket across the finer buckets it spans (peaks are preserved, their
+// duration is overstated by up to one old bucket - far better than losing them).
+// When the data doesn't fit dstCap, the NEWEST portion is kept.
+//
+// src is a ring of srcCap elements with srcWrite = next-write index; dst gets
+// the result DENSE, oldest-first, at [0..returned). dst must not alias src.
+// stride/offset address one component of multi-value columns (the spectrogram
+// stores SPECTRUM_BANDS uint16 per column: stride=bands, offset=band); element
+// i lives at buf[i*stride+offset]. Returns the output bucket count. Pure.
+inline uint32_t resampleMaxPool(const uint16_t *src, uint32_t srcCap, uint32_t srcWrite,
+                                uint32_t srcCount, uint32_t oldMs, uint32_t newMs,
+                                uint16_t *dst, uint32_t dstCap,
+                                uint32_t stride = 1, uint32_t offset = 0) {
+  if (!src || !dst || srcCap == 0 || dstCap == 0 || oldMs == 0 || newMs == 0 || stride == 0)
+    return 0;
+  if (srcCount > srcCap) srcCount = srcCap;
+  if (srcCount == 0) return 0;
+  uint64_t spanMs = (uint64_t)srcCount * oldMs;
+  uint32_t n = (uint32_t)((spanMs + newMs - 1) / newMs);
+  if (n > dstCap) n = dstCap; // keep the newest portion
+  for (uint32_t k = 0; k < n; k++) { // k = output buckets before "now" (0 = newest)
+    // Source buckets (j before "now") overlapping output interval [k, k+1)*newMs.
+    uint32_t jLo = (uint32_t)((uint64_t)k * newMs / oldMs);
+    uint32_t jHi = (uint32_t)(((uint64_t)(k + 1) * newMs + oldMs - 1) / oldMs);
+    if (jHi > srcCount) jHi = srcCount;
+    uint16_t peak = 0;
+    for (uint32_t j = jLo; j < jHi; j++) {
+      uint16_t v = src[((srcWrite + srcCap - 1 - (j % srcCap)) % srcCap) * stride + offset];
+      if (v > peak) peak = v;
+    }
+    dst[(n - 1 - k) * stride + offset] = peak;
+  }
+  return n;
+}
+
 } // namespace history

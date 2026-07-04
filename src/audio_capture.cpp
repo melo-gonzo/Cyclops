@@ -304,7 +304,7 @@ body.viewer #vbadge{display:inline-block}
 <div class="card">
   <h3>Event plot
     <span style="float:right;font-weight:400">
-      <select id="histwin" onchange="setHistWin(this.value)" title="device retention: how far back level/threshold history is kept. Sets the per-bucket resolution at fixed memory; changing it clears stored history."
+      <select id="histwin" onchange="setHistWin(this.value)" title="device retention: how far back level/threshold history is kept. Sets the per-bucket resolution at fixed memory; existing history is re-bucketed to the new resolution."
         style="background:#222a33;color:#9aa4b0;border:1px solid #2a313a;border-radius:6px;font-size:.85em;padding:1px 4px">
         <option value="360">keep 6h</option>
         <option value="720">keep 12h</option>
@@ -905,7 +905,7 @@ async function drawSpectrogram(){
 }
 // dark → blue → cyan → yellow → red colormap for u in [0,1].
 function heat(u){const s=[[10,12,18],[30,60,140],[40,170,180],[230,200,60],[240,70,60]];const x=u*(s.length-1),i=Math.min(s.length-2,Math.floor(x)),f=x-i,a=s[i],b=s[i+1];return"rgb("+Math.round(a[0]+f*(b[0]-a[0]))+","+Math.round(a[1]+f*(b[1]-a[1]))+","+Math.round(a[2]+f*(b[2]-a[2]))+")";}
-async function setHistWin(v){await fetch("/audio/config?hist_win="+v);} // ring clears server-side; poll repaints
+async function setHistWin(v){await fetch("/audio/config?hist_win="+v);} // ring re-buckets server-side; poll repaints
 async function applySpec(){
   // Optional chaining: don't throw if habmin/bandtc are absent (partial DOM /
   // future edits) - the sibling reads are already null-safe id-globals.
@@ -1599,14 +1599,17 @@ static volatile uint32_t warmupUntilMs = WARMUP_MS;
 // Retention window for the amplitude/threshold history, in minutes (NVS-backed).
 // The bucket duration spreads this window over the fixed HIST_BUCKETS columns,
 // so a longer window trades resolution for span at constant memory. Changing it
-// restarts the ring (histClearReq) so every bucket shares one cadence.
+// re-buckets the ring to the new cadence (histRebucketReq) so collected history
+// is preserved - never wiped - across a window change.
 static volatile uint32_t histWindowMin = DEFAULT_HIST_WIN_MIN;
-static volatile bool     histClearReq  = false; // window changed: capture task restarts the ring
+static volatile bool     histRebucketReq = false;   // window changed: capture task re-buckets the ring
+static volatile uint32_t histRebucketOldMs = 0;     // cadence the ring was recorded at
 
-static inline uint32_t histBucketMs() {
-  uint32_t b = (uint32_t)((uint64_t)histWindowMin * 60000ULL / HIST_BUCKETS);
+static inline uint32_t histBucketMsFor(uint32_t winMin) {
+  uint32_t b = (uint32_t)((uint64_t)winMin * 60000ULL / HIST_BUCKETS);
   return b < 250 ? 250 : b; // floor so cosf/sinf-free integer math stays sane
 }
+static inline uint32_t histBucketMs() { return histBucketMsFor(histWindowMin); }
 
 // Amplitude history ring (peak RMS per bucket, newest at histWrite-1).
 // thrHistBuf records the effective trigger threshold at each bucket close
@@ -1618,6 +1621,37 @@ static volatile uint32_t histCount = 0;
 static volatile bool histRestoring = false; // audioTask skips bucket stores during rebuild
 static float bucketPeak = 0.0f;
 static uint32_t bucketStartMs = 0;
+
+// Retention window changed: re-bucket the amplitude + threshold rings from the
+// recorded cadence to the current one (history.h resampleMaxPool) so the plot
+// keeps its history. Runs in the capture task (the rings' only writer); HTTP
+// readers snapshot indices under audioMux and read cells unlocked, so at worst
+// one poll draws a torn line - same accepted exposure as sdRestoreHistory.
+// Scratch alloc failure falls back to the old restart-the-ring behavior (n=0).
+static void histRebucketRings() {
+  uint32_t oldMs = histRebucketOldMs, newMs = histBucketMs();
+  uint32_t cnt, w;
+  portENTER_CRITICAL(&audioMux);
+  cnt = histCount;
+  w = histWrite;
+  portEXIT_CRITICAL(&audioMux);
+  if (oldMs == newMs) return; // e.g. both windows floor to the 250ms minimum
+  uint32_t n = 0;
+  uint16_t *tmp = (cnt && oldMs && histBuf) ? (uint16_t *)ps_malloc(HIST_BUCKETS * 2) : NULL;
+  if (tmp) {
+    n = history::resampleMaxPool(histBuf, HIST_BUCKETS, w, cnt, oldMs, newMs, tmp, HIST_BUCKETS);
+    memcpy(histBuf, tmp, n * 2);
+    if (thrHistBuf) {
+      history::resampleMaxPool(thrHistBuf, HIST_BUCKETS, w, cnt, oldMs, newMs, tmp, HIST_BUCKETS);
+      memcpy(thrHistBuf, tmp, n * 2);
+    }
+    free(tmp);
+  }
+  portENTER_CRITICAL(&audioMux);
+  histWrite = n % HIST_BUCKETS;
+  histCount = n;
+  portEXIT_CRITICAL(&audioMux);
+}
 
 static WebServer *audioServer = NULL;
 static TaskHandle_t tAudio = NULL;
@@ -2214,7 +2248,9 @@ static void sdRestoreHistory() {
   uint32_t hdr[4] = {0, 0, 0, 0};
   bool ok = f && f.read((uint8_t *)hdr, sizeof(hdr)) == (int)sizeof(hdr) && hdr[0] == HIST_MAGIC;
   uint32_t cnt = ok && hdr[2] <= HIST_BUCKETS ? hdr[2] : 0;
-  if (ok && hdr[3] != histWindowMin) cnt = 0; // window changed: cadence differs, discard
+  // hdr[3] is the retention window the snapshot was recorded at; only trust it
+  // in the valid range (older/corrupt files discard rather than misresample).
+  if (ok && (hdr[3] < HIST_WIN_MIN_MIN || hdr[3] > HIST_WIN_MAX_MIN)) cnt = 0;
   uint16_t *amp = NULL, *thr = NULL;
   if (cnt) {
     amp = (uint16_t *)ps_malloc(cnt * 2);
@@ -2227,6 +2263,28 @@ static void sdRestoreHistory() {
   }
   if (f) f.close();
   xSemaphoreGive(sdMutex);
+
+  // Window changed since the snapshot: re-bucket it to the current cadence
+  // instead of discarding (the old behavior deleted a day of history for a
+  // settings tweak). Dense arrays: cap == write == count.
+  uint32_t savedMs = histBucketMsFor(hdr[3]);
+  if (cnt && savedMs != histBucketMs()) {
+    uint16_t *amp2 = (uint16_t *)ps_malloc(HIST_BUCKETS * 2);
+    uint16_t *thr2 = (uint16_t *)ps_malloc(HIST_BUCKETS * 2);
+    if (amp2 && thr2) {
+      uint32_t n = history::resampleMaxPool(amp, cnt, cnt, cnt, savedMs,
+                                            histBucketMs(), amp2, HIST_BUCKETS);
+      history::resampleMaxPool(thr, cnt, cnt, cnt, savedMs, histBucketMs(),
+                               thr2, HIST_BUCKETS);
+      free(amp); free(thr);
+      amp = amp2; thr = thr2;
+      cnt = n;
+    } else { // scratch alloc failed: keep the old discard behavior
+      if (amp2) free(amp2);
+      if (thr2) free(thr2);
+      cnt = 0;
+    }
+  }
 
   uint32_t gap = ((uint32_t)time(NULL) - hdr[1]) * 1000ULL / histBucketMs();
   if (cnt && gap < HIST_BUCKETS) {
@@ -2576,22 +2634,54 @@ static int      spectroWrite = 0;
 static int      spectroCount = 0;
 static float    spectroAccum[SPECTRUM_BANDS];
 static uint32_t spectroBucketStart = 0;
-static volatile bool spectroClearReq = false;     // window changed: capture task restarts the ring
+static volatile bool spectroRebucketReq = false;   // window changed: capture task re-buckets the ring
+static volatile uint32_t spectroRebucketOldMs = 0; // cadence the ring was recorded at
 static volatile bool spectroRestoring = false;    // capture task skips column stores during rebuild
 static float    specWin[FFT_N];                    // precomputed Hann window (constant)
 
 // Per-column bucket duration for the current window: minutes spread over the
 // fixed 240 columns.
-static inline uint32_t spectroBucketMs() {
-  uint32_t b = spectroMinutes * 60000UL / SPECTRO_COLS;
+static inline uint32_t spectroBucketMsFor(uint32_t minutes) {
+  uint32_t b = minutes * 60000UL / SPECTRO_COLS;
   return b < 50 ? 50 : b;
+}
+static inline uint32_t spectroBucketMs() { return spectroBucketMsFor(spectroMinutes); }
+
+// Heatmap window changed: re-bucket the ring column-wise to the new cadence
+// (per-band strided resampleMaxPool) so the collected heatmap survives the
+// change. Capture task only (the ring's sole writer); readers snapshot indices
+// under audioMux and stream cells unlocked - a torn column is cosmetic, same
+// as the /audio/spectrogram contract. Alloc failure falls back to a clear.
+static void spectroRebucketRing() {
+  uint32_t oldMs = spectroRebucketOldMs, newMs = spectroBucketMs();
+  uint32_t cnt, w;
+  portENTER_CRITICAL(&audioMux);
+  cnt = (uint32_t)spectroCount;
+  w = (uint32_t)spectroWrite;
+  portEXIT_CRITICAL(&audioMux);
+  if (oldMs == newMs) return;
+  uint32_t n = 0;
+  uint16_t *tmp = (cnt && oldMs)
+                      ? (uint16_t *)ps_malloc(SPECTRO_COLS * SPECTRUM_BANDS * 2)
+                      : NULL;
+  if (tmp) {
+    for (uint32_t b = 0; b < SPECTRUM_BANDS; b++)
+      n = history::resampleMaxPool(spectro, SPECTRO_COLS, w, cnt, oldMs, newMs,
+                                   tmp, SPECTRO_COLS, SPECTRUM_BANDS, b);
+    memcpy(spectro, tmp, n * SPECTRUM_BANDS * 2);
+    free(tmp);
+  }
+  portENTER_CRITICAL(&audioMux);
+  spectroWrite = (int)(n % SPECTRO_COLS);
+  spectroCount = (int)n;
+  portEXIT_CRITICAL(&audioMux);
 }
 
 // Snapshot the heatmap ring to SD so the frequency history survives a reboot,
 // mirroring sdSaveHistory. Far smaller (~15KB) so one mutex hold is fine. The
-// header carries spectroMinutes; a window change on the next boot invalidates
-// the file (the per-column cadence would no longer match). Shares the
-// HIST_SAVE_MS cadence from sdWriterTask.
+// header carries spectroMinutes so a restore under a different window can
+// re-bucket the columns to the current cadence. Shares the HIST_SAVE_MS
+// cadence from sdWriterTask.
 static void sdSaveSpectro() {
   if (!sdAvailable) return;
   if (time(NULL) < 1600000000) return;
@@ -2621,8 +2711,8 @@ static void sdSaveSpectro() {
 // Rebuild the heatmap ring from the last snapshot: saved columns, then a zero
 // (silence) gap for the downtime, then the live columns captured since boot -
 // the same age-by-gap reconstruction as sdRestoreHistory, with a 32-band
-// column stride. Only restores when the saved window matches the current one
-// (same cadence) and the gap is shorter than the whole window.
+// column stride. A snapshot saved at a different window is re-bucketed to the
+// current cadence (per-band resampleMaxPool) instead of discarded.
 static void sdRestoreSpectro() {
   if (!sdAvailable) return;
 
@@ -2632,7 +2722,9 @@ static void sdRestoreSpectro() {
   uint32_t hdr[4] = {0, 0, 0, 0};
   bool ok = f && f.read((uint8_t *)hdr, sizeof(hdr)) == (int)sizeof(hdr) && hdr[0] == SPECTRO_MAGIC;
   uint32_t cnt = ok && hdr[2] <= SPECTRO_COLS ? hdr[2] : 0;
-  if (ok && hdr[3] != spectroMinutes) cnt = 0; // window changed: cadence differs, discard
+  // hdr[3] = window (minutes) the snapshot was recorded at; discard only if
+  // it's outside the valid range (older/corrupt file).
+  if (ok && (hdr[3] < SPECTRO_MIN_MINUTES || hdr[3] > SPECTRO_MAX_MINUTES)) cnt = 0;
   uint16_t *cols = NULL;
   if (cnt) {
     cols = (uint16_t *)ps_malloc(cnt * colBytes);
@@ -2642,6 +2734,23 @@ static void sdRestoreSpectro() {
   xSemaphoreGive(sdMutex);
 
   uint32_t bucketMs = spectroBucketMs();
+  // Window changed since the snapshot: re-bucket to the current cadence
+  // (dense arrays: cap == write == count) instead of losing the heatmap.
+  uint32_t savedMs = spectroBucketMsFor(hdr[3]);
+  if (cnt && savedMs != bucketMs) {
+    uint16_t *cols2 = (uint16_t *)ps_malloc(SPECTRO_COLS * colBytes);
+    if (cols2) {
+      uint32_t n = 0;
+      for (uint32_t b = 0; b < SPECTRUM_BANDS; b++)
+        n = history::resampleMaxPool(cols, cnt, cnt, cnt, savedMs, bucketMs,
+                                     cols2, SPECTRO_COLS, SPECTRUM_BANDS, b);
+      free(cols);
+      cols = cols2;
+      cnt = n;
+    } else {
+      cnt = 0; // scratch alloc failed: keep the old discard behavior
+    }
+  }
   uint32_t gap = ((uint32_t)time(NULL) - hdr[1]) * 1000UL / bucketMs; // downtime in columns
   if (cnt && gap < SPECTRO_COLS) {
     spectroRestoring = true;
@@ -2769,15 +2878,13 @@ static void spectrumCompute() {
   portEXIT_CRITICAL(&audioMux);
 
   // Fold into the spectrogram ring (peak per band per bucket). A window change
-  // restarts the ring so every column shares one cadence.
+  // re-buckets the ring to the new cadence, preserving the collected heatmap.
   uint32_t now = millis();
-  if (spectroClearReq) {
-    portENTER_CRITICAL(&audioMux);
-    spectroWrite = 0; spectroCount = 0;
-    portEXIT_CRITICAL(&audioMux);
+  if (spectroRebucketReq) {
+    spectroRebucketRing();
     for (int b = 0; b < SPECTRUM_BANDS; b++) spectroAccum[b] = 0.0f;
     spectroBucketStart = now;
-    spectroClearReq = false;
+    spectroRebucketReq = false;
   }
   if (spectroBucketStart == 0) spectroBucketStart = now;
   for (int b = 0; b < SPECTRUM_BANDS; b++)
@@ -2928,13 +3035,11 @@ static void audioTask(void *pvParameters) {
     // boot-only HIST_SETTLE_MS guard let those resume spikes through; gate on
     // warmupUntilMs too, which is re-armed on every (re)start (lines ~1987,
     // ~2606) right alongside the noise-floor reset.
-    if (histClearReq) { // retention window changed: restart the ring at the new cadence
-      portENTER_CRITICAL(&audioMux);
-      histWrite = 0; histCount = 0;
-      portEXIT_CRITICAL(&audioMux);
+    if (histRebucketReq) { // retention window changed: re-bucket, don't wipe
+      histRebucketRings();
       bucketPeak = 0.0f;
       bucketStartMs = nowMs;
-      histClearReq = false;
+      histRebucketReq = false;
     }
     if (nowMs < HIST_SETTLE_MS || nowMs < warmupUntilMs) {
       bucketPeak = 0.0f; // discard boot/resume DC-settling transient
@@ -3355,15 +3460,22 @@ static void handleAudioConfig() {
   if (audioServer->hasArg("spectro_min")) {
     uint32_t v = strtoul(audioServer->arg("spectro_min").c_str(), NULL, 10);
     if (v >= SPECTRO_MIN_MINUTES && v <= SPECTRO_MAX_MINUTES && v != spectroMinutes) {
+      // Same pattern as hist_win: note the cadence the ring holds now, then let
+      // the capture task re-bucket to the new one - history is preserved.
+      if (!spectroRebucketReq) spectroRebucketOldMs = spectroBucketMs();
       spectroMinutes = v;
-      spectroClearReq = true;  // restart the ring at the new cadence
+      spectroRebucketReq = true;
     }
   }
   if (audioServer->hasArg("hist_win")) {
     uint32_t v = strtoul(audioServer->arg("hist_win").c_str(), NULL, 10);
     if (v >= HIST_WIN_MIN_MIN && v <= HIST_WIN_MAX_MIN && v != histWindowMin) {
+      // Record the cadence the ring holds NOW (unless an earlier change is
+      // still pending - the ring is then still at that older cadence), then
+      // let the capture task re-bucket to the new one, preserving history.
+      if (!histRebucketReq) histRebucketOldMs = histBucketMs();
       histWindowMin = v;
-      histClearReq = true;     // restart the amplitude ring at the new cadence
+      histRebucketReq = true;
     }
   }
   if (audioServer->hasArg("en")) {

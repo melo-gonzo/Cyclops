@@ -66,13 +66,35 @@ bool metricsInit() {
 uint32_t metricsBucketMs() { return metBucketMs(); }
 uint32_t metricsWindowMin() { return g_windowMin; }
 
-// Change the retention window (minutes). Restarts the ring because existing
-// buckets were captured at the old cadence, and persists to NVS.
+// Change the retention window (minutes). Existing buckets were captured at the
+// old cadence, so each ring is re-bucketed (history.h resampleMaxPool) to the
+// new one - collected history survives the change instead of being wiped.
+// Persisted to NVS.
 void metricsSetWindowMin(uint32_t m) {
   if (m < MET_WIN_MIN_MIN || m > MET_WIN_MAX_MIN || m == g_windowMin) return;
+  uint32_t oldMs = metBucketMs();
   g_windowMin = m;
-  g_write = 0;
-  g_count = 0;
+  uint32_t newMs = metBucketMs();
+  if (oldMs != newMs) {
+    // The loop-task sampler may land one bucket mid-rebucket (no lock: holding
+    // g_mux across a 37KB rewrite would stall it far longer); worst case is one
+    // glitched column vs. the full wipe this replaced. Scratch alloc failure
+    // falls back to that old restart-the-ring behavior (n stays 0).
+    uint32_t n = 0;
+    uint16_t *tmp = (g_ring[0] && g_count)
+                        ? (uint16_t *)ps_malloc((size_t)MET_BUCKETS * sizeof(uint16_t))
+                        : NULL;
+    if (tmp) {
+      for (int i = 0; i < M_COUNT; i++) {
+        n = history::resampleMaxPool(g_ring[i], MET_BUCKETS, g_write, g_count,
+                                     oldMs, newMs, tmp, MET_BUCKETS);
+        memcpy(g_ring[i], tmp, (size_t)n * sizeof(uint16_t));
+      }
+      free(tmp);
+    }
+    g_write = n % MET_BUCKETS;
+    g_count = n;
+  }
   Preferences p;
   if (p.begin("metrics", false)) { p.putUInt("win", g_windowMin); p.end(); }
 }
@@ -224,7 +246,7 @@ body.viewer #vbadge{display:inline-block}
     <span class="rng" data-s="900">15m</span>
     <span class="rng cur" data-s="3600">1h</span>
     <span class="rng" data-s="0">All</span>
-    <select id="retwin" onchange="setRetWin(this.value)" title="device retention: how long graph history is kept. Sets per-bucket resolution at fixed memory; changing it clears stored history."
+    <select id="retwin" onchange="setRetWin(this.value)" title="device retention: how long graph history is kept. Sets per-bucket resolution at fixed memory; existing history is re-bucketed to the new resolution."
       style="margin-left:10px;background:#222a33;color:#9aa4b0;border:1px solid #2a313a;border-radius:6px;font-size:.85em;padding:1px 4px">
       <option value="120">keep 2h</option>
       <option value="360">keep 6h</option>
