@@ -196,6 +196,10 @@ static uint32_t motHistWrite = 0, motHistCount = 0;
 #define MOT_LVL_BUCKET_MS  30000u
 static uint16_t *motLvlHist = NULL;
 static uint32_t motLvlWr = 0, motLvlCnt = 0;
+// Buckets closed since boot, bumped atomically with motLvlWr: the pooling-grid
+// index for /video/motion/history. Must tick with the write index, not the wall
+// clock, or polls regroup every column (see history.h planAlignedPool).
+static uint32_t motLvlSeq = 0;
 static uint16_t motLvlPeak = 0;       // peak within the bucket being filled
 static uint32_t motLvlBucketMs = 0;   // start of the current bucket (millis)
 
@@ -901,6 +905,7 @@ static void videoMotionTask(void *pvParameters) {
           motLvlHist[motLvlWr] = motLvlPeak;
           motLvlWr = (motLvlWr + 1) % MOT_LVL_HIST_N;
           if (motLvlCnt < MOT_LVL_HIST_N) motLvlCnt++;
+          motLvlSeq++;
           portEXIT_CRITICAL(&videoMux);
           motLvlPeak = 0;
           motLvlBucketMs += MOT_LVL_BUCKET_MS;
@@ -1291,9 +1296,9 @@ static void handleMotionHistory() {
                        ? strtoul(videoServer->arg("end").c_str(), NULL, 10) : 0;
   bool thr = videoServer->hasArg("thr") && videoServer->arg("thr") == "1";
 
-  uint32_t cnt, w;
+  uint32_t cnt, w, seq;
   portENTER_CRITICAL(&videoMux);
-  cnt = motLvlCnt; w = motLvlWr;
+  cnt = motLvlCnt; w = motLvlWr; seq = motLvlSeq;
   portEXIT_CRITICAL(&videoMux);
 
   const uint32_t bucketMs = MOT_LVL_BUCKET_MS;
@@ -1303,10 +1308,12 @@ static void handleMotionHistory() {
   if (want > avail) want = avail;
 
   // Grid-aligned, integer-factor pooling (history.h) so the line's historical
-  // columns are stable between refreshes - no shimmer. Same plan for both the
-  // level and threshold series so they stay 1:1 aligned on the client.
+  // columns are stable between refreshes - no shimmer. The grid index is the
+  // ring's own close counter (ticks with the write index; a wall-clock index
+  // regrouped every column when a poll split the two ticks). Same plan for both
+  // the level and threshold series so they stay 1:1 aligned on the client.
   history::PoolPlan pl =
-      history::planAlignedPool(want, points, cnt, endBuckets, millis() / bucketMs);
+      history::planAlignedPool(want, points, cnt, endBuckets, seq);
   want = pl.want;
   points = pl.columns;
   endBuckets += pl.extraEnd;

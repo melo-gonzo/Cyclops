@@ -168,6 +168,39 @@ void test_plan_columns_never_exceed_request_or_avail(void) {
   TEST_ASSERT_TRUE(p.want <= 60); // fits in availability
 }
 
+// The pooling grid must tick WITH the ring's write index (the caller passes a
+// bucket-close counter as gridIndex). Then across successive closes the output
+// is either byte-identical or scrolled by exactly one whole column - never the
+// every-column regroup a wall-clock gridIndex produced when a poll landed
+// between the clock tick and the ring's own close.
+void test_plan_grid_ticking_with_writes_keeps_columns_stable(void) {
+  enum { CAP = 64 };
+  uint16_t ring[CAP] = {0};
+  uint16_t out[8] = {0}, prev[8] = {0};
+  uint32_t prevN = 0;
+  uint32_t total = 40;      // buckets written so far (ring value = absolute index)
+  uint32_t seq = total + 7; // close counter; constant offset from w must be harmless
+  for (uint32_t i = 0; i < total; i++) ring[i % CAP] = (uint16_t)i;
+  for (int step = 0; step < 10; step++) {
+    ring[total % CAP] = (uint16_t)total; // one bucket closes...
+    total++; seq++;                      // ...w and the grid counter tick together
+    uint32_t cnt = total < CAP ? total : CAP;
+    PoolPlan pl = planAlignedPool(16, 4, cnt, 0, seq); // f = 4
+    uint32_t n = decimateMaxPool(ring, CAP, total % CAP, pl.extraEnd, pl.want, pl.columns, out);
+    TEST_ASSERT_EQUAL_UINT32(4, n);
+    if (prevN == n) {
+      bool same = true, shifted = true;
+      for (uint32_t c = 0; c < n; c++) same = same && out[c] == prev[c];
+      for (uint32_t c = 0; c + 1 < n; c++) shifted = shifted && prev[c + 1] == out[c];
+      TEST_ASSERT_TRUE(same || shifted);
+      if (!same) // scrolled: the new right-edge column pools the next f buckets
+        TEST_ASSERT_EQUAL_UINT16(prev[n - 1] + 4, out[n - 1]);
+    }
+    for (uint32_t c = 0; c < n; c++) prev[c] = out[c];
+    prevN = n;
+  }
+}
+
 // ---- resampleMaxPool: re-bucket a ring to a new cadence (window change) ----
 
 void test_resample_coarsen_pools_pairs(void) {
@@ -269,6 +302,7 @@ int main(int, char **) {
   RUN_TEST(test_plan_handles_zoom_endbuckets);
   RUN_TEST(test_plan_zero_cases);
   RUN_TEST(test_plan_columns_never_exceed_request_or_avail);
+  RUN_TEST(test_plan_grid_ticking_with_writes_keeps_columns_stable);
   RUN_TEST(test_resample_coarsen_pools_pairs);
   RUN_TEST(test_resample_refine_replicates);
   RUN_TEST(test_resample_non_integer_ratio_keeps_peaks);

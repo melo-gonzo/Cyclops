@@ -1629,6 +1629,13 @@ static uint16_t *histBuf = NULL;
 static uint16_t *thrHistBuf = NULL;
 static volatile uint32_t histWrite = 0;
 static volatile uint32_t histCount = 0;
+// Buckets closed since boot, bumped atomically with histWrite. This is the
+// pooling-grid index for /audio/history (planAlignedPool): it must tick at the
+// same instant as the write index or polls landing between a wall-clock tick
+// and the ring's own close regroup every column (see history.h). Restore and
+// re-bucket jump histWrite without touching this; a one-time regroup then is
+// fine - the data itself changed.
+static volatile uint32_t histSeq = 0;
 static volatile bool histRestoring = false; // audioTask skips bucket stores during rebuild
 static float bucketPeak = 0.0f;
 static uint32_t bucketStartMs = 0;
@@ -3064,6 +3071,7 @@ static void audioTask(void *pvParameters) {
       portENTER_CRITICAL(&audioMux);
       histWrite = (histWrite + 1) % HIST_BUCKETS;
       if (histCount < HIST_BUCKETS) histCount++;
+      histSeq++;
       portEXIT_CRITICAL(&audioMux);
       bucketPeak = 0.0f;
       bucketStartMs = nowMs;
@@ -3934,10 +3942,11 @@ static void handleAudioHistory() {
                        ? strtoul(audioServer->arg("end").c_str(), NULL, 10)
                        : 0;
 
-  uint32_t cnt, w;
+  uint32_t cnt, w, seq;
   portENTER_CRITICAL(&audioMux);
   cnt = histCount;
   w = histWrite;
+  seq = histSeq;
   portEXIT_CRITICAL(&audioMux);
 
   // ?thr=1 serves the trigger-threshold series instead of amplitude peaks
@@ -3952,11 +3961,13 @@ static void handleAudioHistory() {
 
   // Grid-aligned, integer-factor pooling so each column max-pools a fixed set of
   // source buckets: the historical part of the line is byte-identical every
-  // refresh (no shimmer); only the newest column turns over. gridIndex is a
-  // monotonic device-clock bucket index - it tracks our own bucket cadence, so no
-  // browser-clock mismatch can slide the window.
+  // refresh (no shimmer); only the newest column turns over. The grid index is
+  // the ring's own bucket-close counter (snapshotted with w/cnt above) so it
+  // ticks at the exact instant the write index does - a wall-clock index here
+  // ticks at a different moment, and a poll landing between the two ticks
+  // regrouped every column (whole-line shimmer on ~half the refreshes).
   history::PoolPlan pl =
-      history::planAlignedPool(want, points, cnt, endBuckets, millis() / bucketMs);
+      history::planAlignedPool(want, points, cnt, endBuckets, seq);
   want = pl.want;
   points = pl.columns;
   endBuckets += pl.extraEnd;

@@ -59,9 +59,15 @@ inline uint32_t decimateMaxPool(const uint16_t *src, uint32_t ringLen, uint32_t 
 //   points     - columns the caller asked for (canvas width-ish)
 //   count      - buckets currently in the ring (saturating is fine)
 //   endBuckets - caller's "shift right edge into the past" (0 = live)
-//   gridIndex  - a MONOTONIC bucket index from the device clock (millis/bucketMs);
-//                only its value mod f matters, so any constant phase offset from
-//                the ring's own write index is harmless.
+//   gridIndex  - a MONOTONIC bucket counter that ticks WHEN THE RING'S WRITE
+//                INDEX ticks (e.g. total buckets ever closed, snapshotted under
+//                the same lock as w/count). Only its value mod f matters, but it
+//                must advance in lockstep with w: a clock-derived index
+//                (millis/bucketMs) ticks at a different moment than the ring's
+//                bucket close, and any poll landing between the two ticks sees
+//                extra and w disagree by one - which shifts EVERY column's
+//                pooled source range, i.e. the whole line regroups ("bins
+//                recalculated" shimmer) instead of staying byte-stable.
 //
 // Returns {want, columns, extraEnd}: feed `want` and `columns` to decimateMaxPool
 // (want == columns*f makes its grouping uniform) with endBuckets += extraEnd.
