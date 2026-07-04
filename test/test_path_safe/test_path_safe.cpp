@@ -10,6 +10,8 @@ void test_accepts_valid_names(void) {
   TEST_ASSERT_TRUE(validClipName("clip_00355_h.wav"));
   TEST_ASSERT_TRUE(validClipName("vclip_00010_m.avi"));
   TEST_ASSERT_TRUE(validClipName("vclip_00010_m.mot"));
+  TEST_ASSERT_TRUE(validClipName("clip_00001_a.jpg"));  // audio key-frame thumb
+  TEST_ASSERT_TRUE(validClipName("vclip_00010_m.jpg")); // video key-frame thumb
 }
 
 void test_rejects_path_traversal(void) {

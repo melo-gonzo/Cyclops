@@ -251,6 +251,8 @@ th{color:#8a94a0;font-weight:500;font-size:.8em}
 .auto{background:#3a2f1d;color:#ffd24d}.http{background:#1d3a2a;color:#5df0a0}
 .motion,.video{background:#2d1d3a;color:#c08bff}
 .spectral{background:#3a1d22;color:#f0768a}
+.thumb{width:64px;height:48px;object-fit:cover;border-radius:4px;cursor:pointer;background:#0d0f12;vertical-align:middle;display:block}
+.thumb.big{width:280px;height:auto;position:absolute;z-index:20;box-shadow:0 6px 24px rgba(0,0,0,.6)}
 .pnav{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:.8em;color:#8a94a0}
 .pnav>span:first-child{width:38px}
 .pnav input[type=range]{flex:1;accent-color:#3d9df0;height:22px}
@@ -379,7 +381,7 @@ body.viewer #vbadge{display:inline-block}
 <div class="card" id="sdcard" style="display:none">
   <h3>SD card clips
     <a class="dl" href="#" onclick="clearSd();return false" style="float:right;color:#f05d5d">clear all</a></h3>
-  <div class="tblwrap"><table><thead><tr><th>File</th><th>Time</th><th>Trigger</th><th>Over thr</th><th>Size</th><th>Listen</th><th></th><th></th></tr></thead>
+  <div class="tblwrap"><table><thead><tr><th>Key</th><th>File</th><th>Time</th><th>Trigger</th><th>Over thr</th><th>Size</th><th>Listen</th><th></th><th></th></tr></thead>
   <tbody id="sdclips"></tbody></table></div>
   <div id="sdnav" class="pgnav"></div>
   <div id="sdempty">No files on SD.</div>
@@ -423,7 +425,7 @@ body.viewer #vbadge{display:inline-block}
     <button onclick="applyVidMot()" style="font-size:.85em;padding:6px 12px">apply</button>
     <span id="motlvl" style="font-size:.85em;color:#8a94a0"></span>
   </div>
-  <div class="tblwrap"><table><thead><tr><th>File</th><th>Time</th><th>Trigger</th><th>Size</th><th>Watch</th><th>Audio</th><th></th><th></th></tr></thead>
+  <div class="tblwrap"><table><thead><tr><th>Key</th><th>File</th><th>Time</th><th>Trigger</th><th>Size</th><th>Watch</th><th>Audio</th><th></th><th></th></tr></thead>
   <tbody id="vidclips"></tbody></table></div>
   <div id="vidnav" class="pgnav"></div>
   <div id="vidempty">No video clips.</div>
@@ -549,6 +551,22 @@ function ovr(rms,thr){
   rms=+rms;thr=+thr; // coerce numeric before interpolating
   return "<b>"+(rms/thr).toFixed(1)+"&times;</b> <span class='note'>"+rms+"/"+thr+"</span>";
 }
+// Per-clip key-frame thumbnail cell. The .jpg sidecar shares the clip's name;
+// lazy-loaded so a whole table doesn't fetch at once, and clicking toggles an
+// enlarged overlay. A load error retries a few times with backoff (so a transient
+// "sd busy" 503 doesn't blank it) before giving up - a genuinely missing sidecar
+// (older clips, or the camera had no frame) then just removes itself.
+function thumbCell(name){
+  const j=encodeURIComponent(name.replace(/\.(wav|avi)$/,".jpg"));
+  return "<img class=thumb loading=lazy alt=key data-n='"+j+"' src='/sd/file?name="+j+
+    "' onerror='thumbErr(this)' onclick='this.classList.toggle(\"big\")'>";
+}
+function thumbErr(img){
+  const t=(+img.dataset.t||0)+1;
+  if(t>3){img.remove();return} // no sidecar after retries: nothing to show
+  img.dataset.t=t;
+  setTimeout(()=>{img.src="/sd/file?name="+img.dataset.n+"&r="+Date.now()},500*t);
+}
 async function refreshSd(){
   if(window._clipAudio)return; // don't rebuild rows mid-playback
   try{
@@ -572,7 +590,7 @@ async function refreshSd(){
       const idm=x.name.match(/clip_(\d+)_/);
       const e=(idm&&window._sdMeta)?window._sdMeta[+idm[1]]:null;
       const en=encodeURIComponent(x.name);
-      return "<tr><td>"+esc(x.name)+"</td>"+
+      return "<tr><td style='position:relative'>"+thumbCell(x.name)+"</td><td>"+esc(x.name)+"</td>"+
       "<td>"+(x.mtime>1600000000?fmtTs(x.mtime*1000):"&mdash;")+"</td>"+
       "<td>"+(src?"<span class='src "+src+"'>"+src+"</span>"+(src=='spectral'&&e&&e[2]?" <span class='note'>"+(+e[2])+" Hz</span>":""):"<span class='src'>&mdash;</span>")+"</td>"+
       "<td>"+ovr(e?e[0]:null,e?e[1]:null)+"</td>"+
@@ -1036,7 +1054,7 @@ async function refreshVid(){
       const cls=src=="http"?"http":src=="motion"?"motion":"auto";
       const aud=pairAudio(x.mtime);
       const en=encodeURIComponent(x.name),ena=aud?encodeURIComponent(aud):null;
-      return "<tr><td>"+esc(x.name)+"</td>"+
+      return "<tr><td style='position:relative'>"+thumbCell(x.name)+"</td><td>"+esc(x.name)+"</td>"+
       "<td>"+(x.mtime>1600000000?fmtTs(x.mtime*1000):"&mdash;")+"</td>"+
       "<td>"+(src?"<span class='src "+cls+"'>"+src+"</span>":"&mdash;")+"</td>"+
       "<td>"+(x.size/1048576).toFixed(1)+"MB</td>"+
@@ -2200,6 +2218,9 @@ static void sdEnforceCap() {
          clipIndexOldest(CLIP_AUDIO, name, sizeof(name))) {
     xSemaphoreTake(sdMutex, portMAX_DELAY);
     bool removed = SD.remove(String(SD_CLIP_DIR) + "/" + name);
+    String thumb = String(SD_CLIP_DIR) + "/" + name;
+    thumb.replace(".wav", ".jpg");
+    SD.remove(thumb); // key-frame thumbnail sidecar rides along
     xSemaphoreGive(sdMutex);
     clipIndexRemove(name); // drop from the index whether or not the file existed
     if (removed) Serial.printf("[audio] SD cap (%u): removed %s\n", sdMaxClips, name);
@@ -2399,6 +2420,14 @@ static void sdWriterTask(void *pvParameters) {
                    nowt > 1600000000 ? (uint32_t)nowt : 0);
       // Persist its over-threshold data so the SD table shows it across reboots.
       clipMetaPersist(s.sdIdx, s.trigRms, s.trigThr, s.trigHz);
+      // Key-frame thumbnail: give this sound event a "what did the camera see"
+      // image (clip_NNNNN_x.jpg). No-op if the camera has no frame; non-fatal.
+      char tpath[48];
+      snprintf(tpath, sizeof(tpath), SD_CLIP_DIR "/clip_%05u_%c.jpg", s.sdIdx,
+               s.source == TRIGGER_SOURCE_AUTO ? 'a'
+               : s.source == TRIGGER_SOURCE_HTTP ? 'h'
+               : s.source == TRIGGER_SOURCE_SPECTRAL ? 's' : 'v');
+      videoSaveKeyThumb(tpath);
     } else {
       Serial.printf("[audio] SD write failed for clip %u (%s) - flagging for remount\n",
                     s.id, path);
@@ -3906,6 +3935,7 @@ static void handleSdFile() {
   bool dl = audioServer->hasArg("dl") && audioServer->arg("dl") == "1";
   const char *ctype = name.endsWith(".avi")   ? "video/x-msvideo"
                     : name.endsWith(".mot")   ? "application/json"
+                    : name.endsWith(".jpg")   ? "image/jpeg"
                                               : "audio/wav";
   streamSdFileChunked(f, size, ctype, dl ? name.c_str() : nullptr);
 }
@@ -4186,6 +4216,11 @@ static void handleSdDelete() {
     String mot = name; // motion-map sidecar goes with its clip
     mot.replace(".avi", ".mot");
     SD.remove(String(SD_CLIP_DIR) + "/" + mot);
+  }
+  if (ok) { // key-frame thumbnail sidecar (audio clip_*.jpg or video vclip_*.jpg)
+    String thumb = name;
+    thumb.replace(name.endsWith(".avi") ? ".avi" : ".wav", ".jpg");
+    SD.remove(String(SD_CLIP_DIR) + "/" + thumb);
   }
   xSemaphoreGive(sdMutex);
   if (ok) clipIndexRemove(name.c_str()); // drop from the index (audio clip_ or video vclip_)

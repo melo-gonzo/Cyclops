@@ -49,6 +49,13 @@ void videoTapFrame(const uint8_t *jpg, size_t len);
 // (disabled, no SD, or cross-trigger gated off).
 uint32_t videoNotifyTrigger(uint8_t source);
 
+// Decode the NEWEST tapped camera frame at 1/8 scale and write it as a small
+// (~3-4KB, 128x96) JPEG key-frame thumbnail to `jpgPath` on SD. Used by the audio
+// clip writer to give each saved sound event a "what did the camera see" image.
+// Returns false (no file written) when no camera frame is available, the decode
+// fails, or SD is down. Safe to call from any task; ~60-100ms of CPU.
+bool videoSaveKeyThumb(const char *jpgPath);
+
 // True while the tap ring wants frames - camCB uses this to decide whether
 // it may park itself when no MJPEG viewers are connected.
 bool videoCaptureActive();

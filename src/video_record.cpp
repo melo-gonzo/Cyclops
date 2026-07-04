@@ -50,6 +50,12 @@ static const size_t VRING_TRY[] = {1536 * 1024, 1024 * 1024, 768 * 1024};
 #define DEFAULT_VID_FPS        5
 #define DEFAULT_VID_MAX_FILES  40 // delete-oldest cap; AVIs run ~0.5-3MB each
 
+// ---- Per-clip key-frame thumbnail (vclip_*.jpg / clip_*.jpg sidecar) ----
+// Reuses the motion detector's cheap 1/8-scale JPEG decode, so an XGA frame
+// becomes 128x96; re-encoded at this quality it lands ~3-4KB. Small enough to
+// store next to every clip and load a whole table's worth over the LAN.
+#define THUMB_JPEG_QUALITY 14
+
 // ---- On-device motion detection ----
 // 1/8-scale JPEG decode (DC-only, ~40-80ms) of the newest tapped frame,
 // converted to 8-bit luma, then per-block diff against the previous check.
@@ -443,6 +449,9 @@ static void vidEnforceCap() {
     String mot = avi;
     mot.replace(".avi", ".mot");
     SD.remove(mot); // motion sidecar rides along, if one exists
+    String thumb = avi;
+    thumb.replace(".avi", ".jpg");
+    SD.remove(thumb); // key-frame thumbnail sidecar too
     xSemaphoreGive(sdGetMutex());
     clipIndexRemove(name);
     if (removed) Serial.printf("[video] SD cap (%u): removed %s\n", vidMaxFiles, name);
@@ -509,12 +518,24 @@ static void writeMotSidecar(const char *aviPath, uint32_t firstTs, uint32_t last
   xSemaphoreGive(sdGetMutex());
 }
 
+static bool encodeThumbToSd(const char *jpgPath, const uint8_t *src, size_t srcLen,
+                            uint16_t w, uint16_t h); // defined below (near the decoders)
+
 /**
  * One clip, write-through: open the AVI, drain the pre-roll from the ring,
  * then follow the producer frame by frame until the post-roll window ends.
  * sdMutex is taken per frame so audio clip writes interleave cleanly.
  */
 static void recordClip(uint8_t source, uint32_t trigTs) {
+  // Key-frame thumbnail: copy the first frame at/after the trigger out of the
+  // ring while we hold it (it may be evicted before the clip finishes), then
+  // encode a small .jpg sidecar once the AVI is closed. keyJpg==NULL => not yet
+  // captured; if the loop never reaches trigTs (camera stopped) we fall back to
+  // the last written frame so a clip always gets a thumbnail.
+  uint8_t *keyJpg = NULL;
+  uint32_t keyLen = 0;
+  uint16_t keyW = 0, keyH = 0;
+  bool keyFinal = false; // true once we've grabbed a frame at/after the trigger
   // Pre-roll start: oldest ring frame within vPrerollMs of the trigger.
   portENTER_CRITICAL(&videoMux);
   uint32_t oldestSeq = vqSeqNext - vqCount;
@@ -588,6 +609,20 @@ static void recordClip(uint8_t source, uint32_t trigTs) {
     uint32_t pos = f.position();
     xSemaphoreGive(sdGetMutex());
 
+    // Grab the key frame while it's still pinned: the first frame at/after the
+    // trigger, keeping earlier (pre-roll) frames only as a fallback until then.
+    if (wrote && !keyFinal) {
+      bool atTrigger = (int32_t)(ts - trigTs) >= 0;
+      if (keyJpg == NULL || atTrigger) {
+        uint8_t *nb = (uint8_t *)ps_malloc(len);
+        if (nb) {
+          memcpy(nb, vring + off, len);
+          free(keyJpg);
+          keyJpg = nb; keyLen = len; keyW = motW; keyH = motH; keyFinal = atTrigger;
+        }
+      }
+    }
+
     portENTER_CRITICAL(&videoMux);
     vringUsers--;
     recNextSeq++;
@@ -620,12 +655,23 @@ static void recordClip(uint8_t source, uint32_t trigTs) {
   xSemaphoreGive(sdGetMutex());
 
   if (frames == 0) {
+    free(keyJpg); // aborted clip: no sidecar to write
     Serial.printf("[video] clip %u aborted, no frames (%s)\n", fileNum, path);
     return;
   }
   Serial.printf("[video] clip %u -> %s (%u frames, %s trigger)\n",
                 fileNum, path, frames,
                 source == VID_TRIG_HTTP ? "http" : source == VID_TRIG_MOTION ? "motion" : "audio");
+  // Key-frame thumbnail sidecar (vclip_*.jpg): decode the captured trigger frame
+  // to a small JPEG. Non-fatal - a clip without one just shows no thumbnail.
+  if (keyJpg) {
+    char tpath[48];
+    strlcpy(tpath, path, sizeof(tpath));
+    char *dot = strrchr(tpath, '.');
+    if (dot) { strcpy(dot, ".jpg"); encodeThumbToSd(tpath, keyJpg, keyLen, keyW, keyH); }
+    free(keyJpg);
+    keyJpg = NULL;
+  }
   writeMotSidecar(path, firstTs, lastTs);
   // Index the finished clip (file size = movi end + idx1 header + index entries).
   time_t nowt = time(NULL);
@@ -817,6 +863,94 @@ static bool decodeLuma(const uint8_t *jpg, size_t len, uint8_t *out,
   LumaDec d = {jpg, len, out, w, h, 0};
   bool ok = esp_jpg_decode(len, JPG_SCALE_8X, lumaReadCb, lumaWriteCb, &d) == ESP_OK;
   *lumaSum = d.lumaSum;
+  return ok;
+}
+
+// ---- Key-frame thumbnails ----
+// Same 1/8-scale esp_jpg_decode as motion, but kept in colour (RGB888) and
+// re-encoded to a tiny JPEG. Colour is worth the extra 2 bytes/px here: a
+// thumbnail is for a human deciding which clip to open, not for frame-diffing,
+// so jpg2rgb565's dithering (why motion avoids it) is irrelevant - we use the
+// same dimension-checked decoder either way.
+struct RgbDec {
+  const uint8_t *src;
+  size_t len;
+  uint8_t *rgb;         // expW*expH*3 bytes
+  uint16_t expW, expH;  // scaled dims; mismatch aborts (framesize changed)
+};
+
+static bool rgbWriteCb(void *arg, uint16_t x, uint16_t y, uint16_t w,
+                       uint16_t h, uint8_t *data) {
+  RgbDec *d = (RgbDec *)arg;
+  if (data == NULL) { // start (dims announce) or end marker
+    if (x == 0 && y == 0 && w > 0 && (w != d->expW || h != d->expH)) return false;
+    return true;
+  }
+  if ((uint32_t)x + w > d->expW || (uint32_t)y + h > d->expH) return false;
+  for (uint16_t iy = 0; iy < h; iy++) {
+    uint8_t *o = d->rgb + ((size_t)(y + iy) * d->expW + x) * 3;
+    memcpy(o, data + (size_t)iy * w * 3, (size_t)w * 3); // decoder emits R,G,B
+  }
+  return true;
+}
+
+// Decode `src` at 1/8 scale into an RGB888 buffer, re-encode a small JPEG, and
+// write it to `jpgPath` on SD. w/h are the expected 1/8 dims (framesize/8).
+// Returns false without touching SD on any failure. ~60-100ms of CPU.
+static bool encodeThumbToSd(const char *jpgPath, const uint8_t *src, size_t srcLen,
+                            uint16_t w, uint16_t h) {
+  if (!src || srcLen == 0 || w == 0 || h == 0) return false;
+  size_t rgbLen = (size_t)w * h * 3;
+  uint8_t *rgb = (uint8_t *)ps_malloc(rgbLen);
+  if (rgb == NULL) return false;
+  RgbDec d = {src, srcLen, rgb, w, h};
+  bool ok = esp_jpg_decode(srcLen, JPG_SCALE_8X, lumaReadCb, rgbWriteCb, &d) == ESP_OK;
+  if (!ok) { free(rgb); return false; }
+
+  uint8_t *jout = NULL;
+  size_t jlen = 0;
+  ok = fmt2jpg(rgb, rgbLen, w, h, PIXFORMAT_RGB888, THUMB_JPEG_QUALITY, &jout, &jlen);
+  free(rgb);
+  if (!ok || jout == NULL) { if (jout) free(jout); return false; }
+
+  bool wrote = false;
+  xSemaphoreTake(sdGetMutex(), portMAX_DELAY);
+  File f = SD.open(jpgPath, FILE_WRITE);
+  if (f) { wrote = f.write(jout, jlen) == jlen; f.close(); }
+  xSemaphoreGive(sdGetMutex());
+  free(jout);
+  if (!wrote) SD.remove(jpgPath); // don't leave a half-written thumbnail
+  return wrote;
+}
+
+// Public: thumbnail the NEWEST ring frame. Snapshots the frame's offset/len
+// under the mux, pins it (vringUsers) across a brief memcpy out of the ring, then
+// runs the ~80ms decode/encode on the copy so the producer is never stalled.
+// Used by the audio clip writer.
+bool videoSaveKeyThumb(const char *jpgPath) {
+  if (!sdIsAvailable() || vring == NULL) return false;
+  uint16_t w = 0, h = 0;
+  uint32_t off = 0, len = 0;
+  bool have = false;
+  portENTER_CRITICAL(&videoMux);
+  if (vqCount > 0 && motW > 0 && motH > 0) {
+    const VFrame &fr = vq[(vqTail + vqCount - 1) % VQ_MAX];
+    off = fr.off; len = fr.len; w = motW; h = motH;
+    vringUsers++;              // forbid eviction of these bytes while we copy
+    have = true;
+  }
+  portEXIT_CRITICAL(&videoMux);
+  if (!have) return false;
+
+  uint8_t *copy = (uint8_t *)ps_malloc(len);
+  if (copy) memcpy(copy, vring + off, len); // off/len stable while pinned
+  portENTER_CRITICAL(&videoMux);
+  vringUsers--;
+  portEXIT_CRITICAL(&videoMux);
+
+  if (copy == NULL) return false;
+  bool ok = encodeThumbToSd(jpgPath, copy, len, w, h);
+  free(copy);
   return ok;
 }
 
