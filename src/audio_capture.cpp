@@ -140,14 +140,25 @@
 // plot is open): the always-on spectral trigger learns its per-band floors and
 // detects events even when nobody is watching, and the heatmap history stays
 // filled. It's ~1% of one core, cheap next to the camera/WiFi.
-#define FFT_N                512     // 31.25Hz bins over 0..8kHz; ~31 frames/s
-// EMA on the DISPLAYED bars only (~0.25s, FFT runs every 32ms): the FFT produces
-// ~31 frames/s but the plot polls ~1.5s apart, so publishing one raw frame
+#define FFT_N                1024    // 15.6Hz bins over 0..8kHz; ~15.6 frames/s.
+                                     // Fine enough that the low log bands
+                                     // (60-190Hz) stop collapsing onto a single
+                                     // 31.25Hz bin, at +8KB scratch and ~0.1% CPU.
+// Band magnitudes are normalized to the 512-point scale (x 512/FFT_N): raw FFT
+// magnitude grows with N for the same tone, so without this every magnitude
+// consumer - learned band floors, a tuned sminmag, the dBFS ref below, heatmap
+// history recorded at another N - would shift on an FFT_N change.
+#define FFT_MAG_NORM         (512.0f / FFT_N)
+// EMA on the DISPLAYED bars only (~0.5s, FFT runs every 64ms): the FFT produces
+// ~15.6 frames/s but the plot polls ~1.5s apart, so publishing one raw frame
 // strobed wildly. Smoothing the published bars makes them slow-moving without
 // touching triggering (which still uses the raw per-frame magnitude).
-#define SPECTRUM_DISPLAY_ALPHA   0.12f
-// dB(magnitude) a full-scale sine produces in one bin: 20*log10(32767*FFT_N/4).
-// Subtracting it converts our stored "dB above magnitude 1" to ~dBFS (0=clip).
+// (0.22/frame at 15.6f/s ~= the old 0.12 at 31f/s: same wall-clock smoothing.)
+#define SPECTRUM_DISPLAY_ALPHA   0.22f
+// dB(magnitude) a full-scale sine produces in one bin at the normalized
+// (512-point-equivalent) scale: 20*log10(32767*512/4). Subtracting it converts
+// our stored "dB above magnitude 1" to ~dBFS (0=clip). FFT_MAG_NORM keeps this
+// constant across FFT_N changes.
 #define SPECTRO_DBFS_REF     132.4f
 #define SPECTRUM_BANDS       32      // log-spaced display/analysis bands
 #define SPECTRUM_FMIN        60.0f   // lowest band edge, Hz
@@ -167,7 +178,7 @@
 // running baseline) for this long before any trigger can fire, so enabling it
 // doesn't unleash a burst while the floors are still settling.
 #define BAND_WARMUP_MS           8000
-#define BAND_BASELINE_ALPHA      0.02f   // running per-band baseline EMA (~1.6s)
+#define BAND_BASELINE_ALPHA      0.04f   // running per-band baseline EMA (~1.6s at 15.6 frames/s)
 
 // ---- Spectrogram history (RAM only; feeds the heatmap + rolling display) ----
 // Fixed 240 columns; the window length is configurable in minutes by stretching
@@ -2787,7 +2798,7 @@ static void spectrumInit() {
   // duplicate Hann formula: seed to 1.0, then apply the window.
   for (int i = 0; i < FFT_N; i++) specWin[i] = 1.0f;
   fft::hann(specWin, FFT_N);
-  const float binHz = (float)AUDIO_SAMPLE_RATE / FFT_N;  // 31.25 Hz
+  const float binHz = (float)AUDIO_SAMPLE_RATE / FFT_N;  // 15.625 Hz
   const float fmax = 0.5f * AUDIO_SAMPLE_RATE;           // Nyquist 8000
   const float ratio = logf(fmax / SPECTRUM_FMIN);
   for (int b = 0; b < SPECTRUM_BANDS; b++) {
@@ -2828,7 +2839,7 @@ static void spectrumCompute() {
       float m = fft::magnitude(specRe, specIm, k);
       e += m * m; cnt++;
     }
-    mag[b] = cnt ? sqrtf(e / cnt) : 0.0f;
+    mag[b] = cnt ? sqrtf(e / cnt) * FFT_MAG_NORM : 0.0f;
     bandBaseline[b] = (bandBaseline[b] == 0.0f)
                           ? mag[b]
                           : bandBaseline[b] + BAND_BASELINE_ALPHA * (mag[b] - bandBaseline[b]);

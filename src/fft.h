@@ -5,7 +5,7 @@
 // I/O; just float math on caller-owned arrays, so it unit-tests on the host
 // (`pio test -e native`, see test/test_fft).
 //
-// We run only ~30 transforms/sec on 512-point frames, so a plain iterative
+// We run only ~16 transforms/sec on 1024-point frames, so a plain iterative
 // Cooley-Tukey FFT in float is far cheaper than its surroundings - no need for
 // esp-dsp's assembly path, and this stays portable + testable. The audio task
 // (imperative shell) owns the scratch buffers and calls these between chunks.
