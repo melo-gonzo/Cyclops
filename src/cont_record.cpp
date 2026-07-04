@@ -345,8 +345,9 @@ async function clrAll(){
 }
 const segs_=document.getElementById("segs");
 refreshStatus();refreshSegs();
-setInterval(refreshStatus,3000);
-setInterval(refreshSegs,5000);
+setInterval(()=>{if(!document.hidden)refreshStatus()},3000);
+setInterval(()=>{if(!document.hidden)refreshSegs()},5000);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden){refreshStatus();refreshSegs()}});
 </script><script src="/ui.js"></script>
 <script>buildNav('/rec')</script>
 </body></html>

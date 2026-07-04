@@ -95,18 +95,13 @@ static void sccbDiagnosticScan() {
 #define APP_CPU 1
 #define PRO_CPU 0
 
-// Performance parameters
-const int TARGET_FPS = 30;
 // Pacing between server.handleClient() calls. Kept short so dashboard polls
 // (/diag, /audio/status, /video/status, /video/motion, /camera/status) aren't
 // each delayed up to a full tick; core 1 is otherwise idle while camCB blocks
 // on the sensor DMA, so this costs ~nothing.
 const int SERVER_HANDLE_INTERVAL = 8;
 
-// System maintenance intervals
-const unsigned long WIFI_RECONNECT_INTERVAL = 15000;
 const unsigned long RESTART_INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
-const unsigned long WIFI_CHECK_INTERVAL = 5000;
 
 // Frame buffer configuration
 #define BUFFER_COUNT 3
@@ -118,10 +113,8 @@ const unsigned long WIFI_CHECK_INTERVAL = 5000;
 // Global variables
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Timing variables
-unsigned long startTime = 0;
+// Set at the end of setup(); scheduledRestart's AI-Thinker uptime baseline.
 unsigned long startTimeAGAIN = 0;
-unsigned long frameCount = 0;
 
 // Hardware objects
 OV2640 cam;
@@ -573,7 +566,6 @@ void streamCB(void *pvParameters) {
       }
 
       xQueueSend(streamingClients, &client, 0);
-      frameCount++;
       wrote = true;
     }
 
@@ -1005,7 +997,8 @@ void handleMotionPage() {
          "async function tick(){try{const s=await(await fetch('/video/status')).json();"
          "mot.checked=!!s.motion;lvl.textContent=s.motion?s.motion_level:'off';}catch(e){}}"
          "async function tog(){await fetch('/video/config?motion='+(mot.checked?1:0));tick();}"
-         "tick();setInterval(tick,1500);"
+         "tick();setInterval(()=>{if(!document.hidden)tick()},1500);"
+         "document.addEventListener('visibilitychange',()=>{if(!document.hidden)tick()});"
          "</script></body></html>");
   server.send(200, "text/html", h);
 }
@@ -1278,7 +1271,6 @@ void setup() {
 
   xTaskCreatePinnedToCore(mjpegCB, "mjpeg_server", 12288, NULL, 5, &tMjpeg, APP_CPU);
 
-  startTime      = millis();
   startTimeAGAIN = millis();
 
   Serial.println("ESP32-CAM streaming server started successfully!");

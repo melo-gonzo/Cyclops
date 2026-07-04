@@ -135,21 +135,38 @@ window.EventPlot=function(host,opts){
   function range(){const s=document.createElement('input');s.type='range';s.min=0;s.max=1000;s.value=1000;return s}
   function txt(t){const e=mk('span');e.textContent=t;e.style.width='34px';return e}
   function sp(){const e=mk('span');e.style.width='48px';return e}
-  load();setInterval(load,opts.refreshMs||2000);
+  // Periodic refresh: skipped while the tab is hidden (a backgrounded dashboard
+  // otherwise keeps 3 fetches per cycle hitting the device forever) and while a
+  // previous load is still in flight (a slow SD/link would pile up requests).
+  // On return to the tab, refresh immediately so the plot never looks stale.
+  let busy=false;
+  async function tick(){if(document.hidden||busy)return;busy=true;try{await load()}finally{busy=false}}
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)tick()});
+  tick();setInterval(tick,opts.refreshMs||2000);
   return {reload:load};
 };
 
 // Shared top nav, rendered into <div id=nav></div> on every page (one source of
 // truth instead of a copy per page). cur = the current tab's href.
-window.buildNav=async function(cur){
+window.buildNav=function(cur){
   const nav=document.getElementById('nav');if(!nav)return;
   if(!window._navSty){window._navSty=1;const st=document.createElement('style');st.textContent='#vbadge{display:none;background:#2a313a;color:#7fd6a0;border-radius:8px;padding:3px 9px;font-size:.8em}body.viewer #vbadge{display:inline-block}';document.head.appendChild(st)}
-  let name='Cyclops';try{name=(await(await fetch('/caps')).json()).name||name}catch(e){}
   const tabs=[['/','Clips'],['/live','Live'],['/camera','Camera'],['/rec','Record'],['/graphs','Graphs'],['/wifi','WiFi'],['/docs','Docs'],['/jpg','Snapshot']];
-  let h='<b>'+name+'</b>';
-  for(const[href,lbl]of tabs)h+=(cur===href?'<span class="cur">'+lbl+'</span>':'<a href="'+href+'">'+lbl+'</a>');
-  h+='<span id="vbadge" title="read-only viewer: settings disabled">\u{1F441} read-only</span>';
-  nav.innerHTML=h;
+  const render=name=>{
+    let h='<b>'+name+'</b>';
+    for(const[href,lbl]of tabs)h+=(cur===href?'<span class="cur">'+lbl+'</span>':'<a href="'+href+'">'+lbl+'</a>');
+    h+='<span id="vbadge" title="read-only viewer: settings disabled">\u{1F441} read-only</span>';
+    nav.innerHTML=h;
+  };
+  // Render at once with the session-cached device name (no blank nav while the
+  // device answers /caps on a busy link), then refresh the name in the background.
+  let name='Cyclops';try{name=sessionStorage.getItem('_navName')||name}catch(e){}
+  render(name);
+  fetch('/caps').then(r=>r.json()).then(j=>{
+    if(!j.name)return;
+    try{sessionStorage.setItem('_navName',j.name)}catch(e){}
+    if(j.name!==name)render(j.name);
+  }).catch(()=>{});
 };
 })();
 )UIJS";

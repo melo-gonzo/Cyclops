@@ -1073,7 +1073,8 @@ function doUpdate(btn){
 }
 function loadFw(){fetch("/diag").then(r=>r.json()).then(d=>{if(d.fw)fwver.textContent="version: "+d.fw}).catch(()=>{})}
 const st_=document.getElementById("st");
-st();setInterval(st,3000);loadFw();
+st();setInterval(()=>{if(!document.hidden)st()},3000);loadFw();
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)st()});
 </script><script src="/ui.js"></script>
 <script>buildNav('/wifi')</script>
 </body></html>

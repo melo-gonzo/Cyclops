@@ -340,7 +340,9 @@ document.querySelectorAll(".rng").forEach(x=>x.onclick=()=>{
 document.getElementById("all").onclick=()=>{for(const m of META)SEL[m.key]=true;renderLegend();draw()};
 document.getElementById("none").onclick=()=>{for(const m of META)SEL[m.key]=false;renderLegend();draw()};
 window.addEventListener("resize",draw);
-(async()=>{await loadMeta();await poll();setInterval(poll,5000)})();
+(async()=>{await loadMeta();await poll();
+setInterval(()=>{if(!document.hidden)poll()},5000); // /metrics/series is the priciest poll; skip it for hidden tabs
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)poll()});})();
 </script><script src="/ui.js"></script>
 <script>buildNav('/graphs')</script>
 </body></html>)HTML";
