@@ -1441,14 +1441,15 @@ img{width:100%;display:block;border-radius:10px;background:#000;min-height:120px
   <button id="listen" onclick="toggleListen()">&#128264; listen live</button>
 </div>
 <div style="position:relative">
-  <img id="cam" src="/mjpeg/1" alt="live stream">
+  <img id="cam" alt="live stream">
   <canvas id="mot" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none"></canvas>
 </div>
+<script src="/ui.js"></script>
 <script>
-// Drop the MJPEG connection while the tab is hidden; audio keeps playing.
-document.addEventListener("visibilitychange",()=>{
-  cam.src=document.hidden?"":"/mjpeg/1";
-});
+// Robust MJPEG: reads the stream via fetch() and auto-reconnects on stall/drop
+// (a bare <img> would freeze on a half-decoded frame forever). Self-pauses while
+// the tab is hidden; audio keeps playing.
+const camStream=mjpegStream(cam,"/mjpeg/1");camStream.start();
 setInterval(()=>{
   if(document.hidden)return;
   fetch("/camera/status").then(r=>r.json()).then(s=>{

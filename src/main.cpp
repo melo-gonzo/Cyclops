@@ -1008,11 +1008,15 @@ void handleLiveVideoPage() {
   if (!webAuthOk()) return;
   String h = pageOpen("/live");
   h += F("<div class=card><h3>Live video</h3>"
-         "<img src=/mjpeg/1 alt=\"live stream\">"
+         "<img id=cam alt=\"live stream\">"
          "<p class=p style=margin-top:10px>Live MJPEG stream. This board has no "
          "microphone, so there's no audio. Motion detection and its timeline are on "
          "the <a class=lnk href=/>Clips</a> and <a class=lnk href=/graphs>Graphs</a> "
-         "tabs.</p></div></body></html>");
+         "tabs.</p></div>"
+         // Robust MJPEG: fetch()-based reader that auto-reconnects on stall/drop
+         // instead of freezing on a half-decoded frame like a bare <img> does.
+         "<script>mjpegStream(document.getElementById('cam'),'/mjpeg/1').start()</script>"
+         "</body></html>");
   server.send(200, "text/html", h);
 }
 

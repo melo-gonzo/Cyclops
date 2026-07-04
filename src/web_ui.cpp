@@ -146,6 +146,58 @@ window.EventPlot=function(host,opts){
   return {reload:load};
 };
 
+// Robust MJPEG viewer for an <img>. A bare <img src="/mjpeg/1"> NEVER recovers:
+// when the device drops a slow client (streamCB's send deadline) or the stream
+// stalls, the element just freezes on its last - often half-decoded - frame
+// ("stuck on black / half black then the rest"). Here we read the multipart
+// stream with fetch(), hand each JPEG part to the <img> as a blob URL, and a
+// watchdog aborts + reconnects (with backoff) if no frame lands within stallMs -
+// so a dropped/stalled stream self-heals instead of hanging. Pauses while the tab
+// is hidden (frees the device's one viewer slot) and resumes on return.
+// Returns {start,stop}. opts:{stallMs}.
+window.mjpegStream=function(img,url,opts){
+  opts=opts||{};
+  const stallMs=opts.stallMs||4000;
+  let want=false,ctrl=null,prevUrl=null,last=0,retry=500,wd=null,gen=0;
+  function show(u){img.src=u;if(prevUrl)URL.revokeObjectURL(prevUrl);prevUrl=u}
+  function blank(){img.removeAttribute('src');if(prevUrl){URL.revokeObjectURL(prevUrl);prevUrl=null}}
+  // First \r\n\r\n (part-header terminator) in a byte buffer, or -1.
+  const idx4=b=>{for(let i=0;i+3<b.length;i++)if(b[i]===13&&b[i+1]===10&&b[i+2]===13&&b[i+3]===10)return i;return -1};
+  async function conn(){
+    const my=++gen;                       // stale-connection guard (stop/hidden bump gen)
+    if(!want||document.hidden)return;
+    ctrl=new AbortController();
+    let buf=new Uint8Array(0),need=-1;const dec=new TextDecoder();
+    try{
+      const res=await fetch(url+(url.indexOf('?')<0?'?':'&')+'r='+my,{signal:ctrl.signal,cache:'no-store'});
+      if(!res.ok||!res.body)throw 0;
+      last=Date.now();
+      const rd=res.body.getReader();
+      for(;;){
+        const st=await rd.read();
+        if(st.done||my!==gen||!want)break;
+        const v=st.value,nb=new Uint8Array(buf.length+v.length);nb.set(buf);nb.set(v,buf.length);buf=nb;
+        for(;;){                          // drain every complete part now buffered
+          if(need<0){const h=idx4(buf);if(h<0)break;const m=/content-length:\s*(\d+)/i.exec(dec.decode(buf.subarray(0,h)));if(!m)throw 0;need=+m[1];buf=buf.subarray(h+4)}
+          if(buf.length<need)break;
+          show(URL.createObjectURL(new Blob([buf.subarray(0,need)],{type:'image/jpeg'})));
+          buf=buf.subarray(need);need=-1;last=Date.now();retry=500; // healthy frame: reset backoff
+        }
+      }
+    }catch(e){}
+    if(my===gen&&want&&!document.hidden)schedule();
+  }
+  function schedule(){const t=retry;retry=Math.min(retry*2,5000);setTimeout(()=>{if(want&&!document.hidden)conn()},t)}
+  function watch(){if(want&&!document.hidden&&ctrl&&Date.now()-last>stallMs)ctrl.abort()} // stall -> reconnect via catch
+  function start(){if(want)return;want=true;retry=500;last=Date.now();if(!wd)wd=setInterval(watch,1000);conn()}
+  function stop(){want=false;gen++;if(ctrl)ctrl.abort();if(wd){clearInterval(wd);wd=null}blank()}
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){gen++;if(ctrl)ctrl.abort();blank()}
+    else if(want){retry=500;last=Date.now();conn()}
+  });
+  return {start,stop};
+};
+
 // Shared top nav, rendered into <div id=nav></div> on every page (one source of
 // truth instead of a copy per page). cur = the current tab's href.
 window.buildNav=function(cur){

@@ -348,7 +348,7 @@ body.viewer #vbadge{display:inline-block}
     <label style="float:right;text-transform:none;letter-spacing:0"><input type="checkbox" id="pvon" checked onchange="pvTick()"> live</label>
     <label id="motwrap" style="float:right;text-transform:none;letter-spacing:0;margin-right:14px"><input type="checkbox" id="moton" onchange="motPoll()"> motion</label></h3>
   <div style="position:relative">
-    <img id="pv" src="/mjpeg/1" alt="preview">
+    <img id="pv" alt="preview">
     <canvas id="mot" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none"></canvas>
   </div>
 </div>
@@ -461,6 +461,7 @@ body.viewer #vbadge{display:inline-block}
   <button onclick="resetCam()" style="background:#2a313a">restore defaults</button>
   <span class="note">changes apply live and persist across reboots</span>
 </div></div>
+<script src="/ui.js"></script>
 <script>
 const SLIDERS=["quality","brightness","contrast","saturation","ae_level","aec_value","agc_gain"];
 const CHECKS=["hmirror","vflip","aec","aec2","agc","awb","awb_gain","bpc","wpc","raw_gma","lenc","dcw","colorbar"];
@@ -505,22 +506,26 @@ function resetCam(){
     return r.json().then(sync).then(()=>setTimeout(pvNow,400));
   });
 }
-// Live = ride the MJPEG stream (one connection, frames as fast as the link
-// allows); unchecked = a single still, refreshed after each config change.
-// pvNow only reloads in stills mode so config changes don't restart the
-// stream connection.
+// Live = ride the MJPEG stream via the robust reader (fetch()-based, auto-
+// reconnects on stall/drop and self-pauses when the tab is hidden, instead of a
+// bare <img> that freezes on a half-decoded frame); unchecked = a single still,
+// refreshed after each config change. pvNow only reloads in stills mode so config
+// changes don't restart the stream connection.
+let camStream=null;
+function pvStream(){if(!camStream)camStream=mjpegStream(document.getElementById("pv"),"/mjpeg/1");return camStream}
 function pvSet(){
   const pv=document.getElementById("pv");
-  if(document.getElementById("pvon").checked)pv.src="/mjpeg/1";
-  else pv.src="/jpg?t="+Date.now();
+  if(document.getElementById("pvon").checked)pvStream().start();
+  else{pvStream().stop();pv.src="/jpg?t="+Date.now()}
 }
 function pvNow(){
   if(!document.hidden&&!document.getElementById("pvon").checked)pvSet();
 }
 function pvTick(){if(!document.hidden)pvSet()}
+// The live stream's own visibility pause/resume is handled inside mjpegStream;
+// here we only refresh the still when returning to a stills-mode tab.
 document.addEventListener("visibilitychange",()=>{
-  if(document.hidden)document.getElementById("pv").src=""; // free the stream slot
-  else pvSet();
+  if(!document.hidden&&!document.getElementById("pvon").checked)pvSet();
 });
 setInterval(()=>{ // fps poll only: must not yank controls mid-adjustment
   if(document.hidden)return;
@@ -665,7 +670,6 @@ _motCv.onpointerup=_motCv.onpointercancel=e=>{
 setInterval(motPoll,500);
 refresh();pvTick();
 </script>
-<script src="/ui.js"></script>
 <script>buildNav('/camera')</script>
 </body></html>)rawliteral";
 
