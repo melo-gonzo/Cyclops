@@ -147,6 +147,9 @@ static volatile int latestFrame = -1;
 // than they drain; assembling each one is a wasted ~80KB PSRAM memcpy that
 // contends with streamCB's TX reads. camCB skips assembly while this is set.
 static volatile bool framePending = false;
+// True while streamCB is parked with no viewers (blocked on its notification).
+// camCB reads this to decide whether the camera itself may park.
+static volatile bool streamTaskIdle = false;
 
 // Pre-calculated HTTP response headers
 static const char STREAM_HEADER[] = "HTTP/1.1 200 OK\r\n"
@@ -347,7 +350,7 @@ void camCB(void *pvParameters) {
     // The video pre-roll ring + motion detector need frames even with no stream
     // viewers, so only park the camera when capture (recording or motion) is
     // inactive too. videoCaptureActive() is true on every board now.
-    if (eTaskGetState(tStream) == eSuspended && !videoCaptureActive()) {
+    if (streamTaskIdle && !videoCaptureActive()) {
       esp_task_wdt_delete(NULL); // a parked task can't feed the WDT
       g_camBeat = 0;             // sentinel: parked/unwatched, not a WDT culprit
       vTaskSuspend(NULL);
@@ -469,9 +472,10 @@ void handleJPGSstream(void) {
     return;
   }
 
-  if (eTaskGetState(tCam) == eSuspended)    vTaskResume(tCam);
-  if (eTaskGetState(tStream) == eSuspended) vTaskResume(tStream);
-  xTaskNotifyGive(tStream); // fan out to the new viewer immediately, don't wait
+  if (eTaskGetState(tCam) == eSuspended) vTaskResume(tCam);
+  // streamCB parks on its notification (never vTaskSuspend), so this give both
+  // wakes an idle task and requests an immediate fan-out - no resume needed.
+  xTaskNotifyGive(tStream);
 }
 
 /**
@@ -523,7 +527,16 @@ void streamCB(void *pvParameters) {
 
     UBaseType_t activeClients = uxQueueMessagesWaiting(streamingClients);
     if (activeClients == 0) {
-      vTaskSuspend(NULL);
+      // Race-free park: block on the task notification, NOT vTaskSuspend. A
+      // give from handleJPGSstream that lands between the queue check above and
+      // blocking here is latched, so the wakeup can't be lost. The old
+      // suspend-based park had exactly that hole: a viewer could be enqueued in
+      // the window before vTaskSuspend (the handler saw a still-running task and
+      // skipped vTaskResume), leaving the client queued but never served - a
+      // black stream that only healed when the NEXT viewer connected.
+      streamTaskIdle = true;
+      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+      streamTaskIdle = false;
       continue;
     }
 

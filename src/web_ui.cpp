@@ -191,8 +191,13 @@ window.mjpegStream=function(img,url,opts){
   function watch(){if(want&&!document.hidden&&ctrl&&Date.now()-last>stallMs)ctrl.abort()} // stall -> reconnect via catch
   function start(){if(want)return;want=true;retry=500;last=Date.now();if(!wd)wd=setInterval(watch,1000);conn()}
   function stop(){want=false;gen++;if(ctrl)ctrl.abort();if(wd){clearInterval(wd);wd=null}blank()}
+  // On hide: drop the connection (frees the device's viewer slot) but KEEP the
+  // last frame on screen. Browsers freeze/discard hidden tabs, and if our JS
+  // never gets to run again the user returns to whatever is painted - a blanked
+  // <img> reads as "camera died" (black box), a stale frame reads as a paused
+  // stream that then refreshes on reconnect.
   document.addEventListener('visibilitychange',()=>{
-    if(document.hidden){gen++;if(ctrl)ctrl.abort();blank()}
+    if(document.hidden){gen++;if(ctrl)ctrl.abort()}
     else if(want){retry=500;last=Date.now();conn()}
   });
   return {start,stop};
@@ -225,6 +230,10 @@ window.buildNav=function(cur){
 
 static void handleUiJs() {
   if (!webAuthCheck(*uiServer)) return;
+  // The UI changes with every firmware release; a heuristically-cached stale
+  // copy (this server sends no validators) can outlive an OTA and leave pages
+  // driving a UI that no longer matches the device. Always refetch (~16KB, LAN).
+  uiServer->sendHeader("Cache-Control", "no-cache");
   uiServer->send_P(200, "application/javascript", UI_JS);
 }
 
