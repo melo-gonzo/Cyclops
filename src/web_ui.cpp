@@ -158,14 +158,27 @@ window.EventPlot=function(host,opts){
 window.mjpegStream=function(img,url,opts){
   opts=opts||{};
   const stallMs=opts.stallMs||4000;
-  let want=false,ctrl=null,prevUrl=null,last=0,retry=500,wd=null,gen=0;
-  function show(u){img.src=u;if(prevUrl)URL.revokeObjectURL(prevUrl);prevUrl=u}
-  function blank(){img.removeAttribute('src');if(prevUrl){URL.revokeObjectURL(prevUrl);prevUrl=null}}
+  let want=false,ctrl=null,curUrl=null,busy=false,last=0,retry=500,wd=null,gen=0;
+  // Swap the <img> only when the browser finished decoding the previous frame.
+  // Setting src on every arriving frame ABORTS the in-flight decode; on a viewer
+  // machine that decodes slower than frames arrive (~17-25/s) no load ever
+  // completes and the element stays black forever. A live view drops frames.
+  function show(bytes){
+    if(busy)return;                       // decoder still busy: drop this frame
+    busy=true;
+    const prev=curUrl;
+    curUrl=URL.createObjectURL(new Blob([bytes],{type:'image/jpeg'}));
+    const done=()=>{img.onload=img.onerror=null;busy=false;if(prev)URL.revokeObjectURL(prev)};
+    img.onload=done;img.onerror=done;
+    img.src=curUrl;
+  }
+  function blank(){img.onload=img.onerror=null;busy=false;img.removeAttribute('src');if(curUrl){URL.revokeObjectURL(curUrl);curUrl=null}}
   // First \r\n\r\n (part-header terminator) in a byte buffer, or -1.
   const idx4=b=>{for(let i=0;i+3<b.length;i++)if(b[i]===13&&b[i+1]===10&&b[i+2]===13&&b[i+3]===10)return i;return -1};
   async function conn(){
     const my=++gen;                       // stale-connection guard (stop/hidden bump gen)
     if(!want||document.hidden)return;
+    img.onload=img.onerror=null;busy=false; // never let a stuck decode gate outlive a connection
     ctrl=new AbortController();
     let buf=new Uint8Array(0),need=-1;const dec=new TextDecoder();
     try{
@@ -180,7 +193,7 @@ window.mjpegStream=function(img,url,opts){
         for(;;){                          // drain every complete part now buffered
           if(need<0){const h=idx4(buf);if(h<0)break;const m=/content-length:\s*(\d+)/i.exec(dec.decode(buf.subarray(0,h)));if(!m)throw 0;need=+m[1];buf=buf.subarray(h+4)}
           if(buf.length<need)break;
-          show(URL.createObjectURL(new Blob([buf.subarray(0,need)],{type:'image/jpeg'})));
+          show(buf.subarray(0,need));
           buf=buf.subarray(need);need=-1;last=Date.now();retry=500; // healthy frame: reset backoff
         }
       }
