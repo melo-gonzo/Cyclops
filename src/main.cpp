@@ -152,6 +152,12 @@ static volatile bool framePending = false;
 // camCB reads this to decide whether the camera itself may park.
 static volatile bool streamTaskIdle = false;
 
+// Cleared until the SD-touching init phase (audio/video/cont) completes. The web
+// server task comes up BEFORE that phase (so a wedged card can't hide the device
+// behind a ping-only window) and watches this flag to know when it's safe to
+// start the camera/stream tasks and register the init-dependent endpoints.
+static volatile bool g_initDone = false;
+
 // Pre-calculated HTTP response headers
 static const char STREAM_HEADER[] = "HTTP/1.1 200 OK\r\n"
                                    "Access-Control-Allow-Origin: *\r\n"
@@ -1061,12 +1067,12 @@ void mjpegCB(void *pvParameters) {
 
   streamingClients = xQueueCreate(MAX_CLIENTS, sizeof(WiFiClient *));
 
-  if (cameraOk) {
-    xTaskCreatePinnedToCore(camCB,    "camera", 6144, NULL, 5, &tCam,    APP_CPU);
-    xTaskCreatePinnedToCore(streamCB, "stream", 6144, NULL, 5, &tStream, PRO_CPU);
-  }
-
-  server.on("/mjpeg/1", HTTP_GET, handleJPGSstream);
+  // Core, boot-safe endpoints - registered NOW so the board is HTTP-reachable
+  // during the post-WiFi SD-init phase (a wedged card can hang that phase until
+  // the 45s WDT/sentinel reboot). These handlers touch only the camera / WiFi /
+  // OTA / diag / metrics subsystems, all initialised before this task is created,
+  // so /diag, /log, /jpg stills, /camera/*, /wifi/reboot and /update stay usable
+  // even while SD init is stuck - the device is never a ping-only black box again.
   server.on("/jpg",     HTTP_GET, handleJPG);
   server.on("/diag",    HTTP_GET, handleDiag);
   server.on("/camera/probe", HTTP_GET, handleCameraProbe); // SCCB vs DVP fault isolation
@@ -1081,28 +1087,44 @@ void mjpegCB(void *pvParameters) {
   camRegisterEndpoints(server);
   wifiPortalRegisterEndpoints(server);
   otaRegisterEndpoints(server); // POST /update firmware upload (both boards)
-#if HAS_AUDIO
-  audioRegisterEndpoints(server);   // also registers "/", "/audio", "/live"
-#else
-  // Camera-only board: no audio dashboard. Serve a motion overview at "/" and a
-  // live-video page at "/live"; motion + its Graphs timeline work without SD.
-  server.on("/",     HTTP_GET, handleMotionPage);
-  server.on("/live", HTTP_GET, handleLiveVideoPage);
-#endif
-  videoRegisterEndpoints(server);   // motion detection + /video/* on every board
-#if HAS_SD
-  contRegisterEndpoints(server);    // "/rec" continuous recording (needs SD)
-#else
-  server.on("/rec",  HTTP_GET, handleFeatureRecNA);
-#endif
   webAuthBegin(server); // collect the Cookie header for remember-me sessions
   server.onNotFound(handleNotFound);
   server.begin();
 
-  Serial.println("HTTP server started");
+  Serial.println("HTTP server started (core endpoints)");
 
+  // The camera/stream tasks and the init-dependent endpoints (live /mjpeg, the
+  // audio/video/rec dashboards + their data/action routes) come up only once
+  // setup() finishes the SD-touching init and sets g_initDone: their handlers read
+  // audio/video/SD state that does not exist yet, and camCB feeds the video ring
+  // so it must not run before videoInit(). Until then those routes 404 (the client
+  // reconnects), which is strictly better than an unreachable, ping-only device.
+  bool full = false;
   xLastWakeTime = xTaskGetTickCount();
   for (;;) {
+    if (!full && g_initDone) {
+      full = true;
+      if (cameraOk) {
+        xTaskCreatePinnedToCore(camCB,    "camera", 6144, NULL, 5, &tCam,    APP_CPU);
+        xTaskCreatePinnedToCore(streamCB, "stream", 6144, NULL, 5, &tStream, PRO_CPU);
+      }
+      server.on("/mjpeg/1", HTTP_GET, handleJPGSstream);
+#if HAS_AUDIO
+      audioRegisterEndpoints(server);   // also registers "/", "/audio", "/live", /sd/*
+#else
+      // Camera-only board: no audio dashboard. Serve a motion overview at "/" and a
+      // live-video page at "/live"; motion + its Graphs timeline work without SD.
+      server.on("/",     HTTP_GET, handleMotionPage);
+      server.on("/live", HTTP_GET, handleLiveVideoPage);
+#endif
+      videoRegisterEndpoints(server);   // motion detection + /video/* on every board
+#if HAS_SD
+      contRegisterEndpoints(server);    // "/rec" continuous recording (needs SD)
+#else
+      server.on("/rec",  HTTP_GET, handleFeatureRecNA);
+#endif
+      Serial.println("HTTP server: live stream + dashboards registered");
+    }
     server.handleClient();
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -1307,6 +1329,13 @@ void setup() {
   // WiFi/mDNS are up so the hostname resolves for espota. Works on the AP too.
   otaInit();
 
+  // Bring the web server up BEFORE the SD-touching init phase. That phase can hang
+  // for up to the 45s WDT on a dying card, and until now the server started after
+  // it - so a wedged card left the device a ping-only black box. mjpegCB serves the
+  // core/diag/OTA/recovery endpoints immediately and adds the live stream +
+  // dashboards once g_initDone is set at the end of the phase below.
+  xTaskCreatePinnedToCore(mjpegCB, "mjpeg_server", 12288, NULL, 5, &tMjpeg, APP_CPU);
+
   // Everything below can touch the SD card (audio boot scan, video clip scan,
   // continuous-recording seed) and the SD layer can hang forever on a dying
   // card - guard the whole phase (see the boot-guard block above setup()).
@@ -1341,7 +1370,9 @@ void setup() {
   contInit(); // continuous-recording settings + rolling pruner (needs SD)
 #endif
 
-  xTaskCreatePinnedToCore(mjpegCB, "mjpeg_server", 12288, NULL, 5, &tMjpeg, APP_CPU);
+  // SD-touching init is done: let the already-running server task start the
+  // camera/stream tasks and register the live stream + audio/video/rec dashboards.
+  g_initDone = true;
 
   bootGuardEnd(); // init finished: clear the hang mark, stop the sentinel
 
