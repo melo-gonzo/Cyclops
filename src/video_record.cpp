@@ -30,6 +30,7 @@
 #include <Preferences.h>
 #include <FS.h>
 #include <SD.h>
+#include <esp_task_wdt.h> // feed the boot WDT during the (bounded) clip scan
 #include <img_converters.h>
 #include <esp_jpg_decode.h>
 
@@ -1605,6 +1606,7 @@ bool videoInit(uint16_t w, uint16_t h) {
       uint32_t scanned = 0;
       while (scanned < 20000 && (entry = dir.openNextFile())) {
         scanned++;
+        esp_task_wdt_reset(); // don't let a slow healthy-card scan trip the boot WDT
         unsigned idx = 0;
         const char *base = strrchr(entry.name(), '/');
         base = base ? base + 1 : entry.name();

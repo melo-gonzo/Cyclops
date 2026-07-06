@@ -33,6 +33,7 @@
 #include <driver/i2s.h>
 #include <math.h>
 #include <FS.h>
+#include <esp_task_wdt.h> // feed the boot WDT during the (bounded) clip scan
 #include <SD.h>
 #include <SPI.h>
 
@@ -2115,6 +2116,8 @@ static bool sdInit(int attempts = SD_MOUNT_ATTEMPTS) {
     uint32_t scanned = 0;
     while (scanned < SD_SCAN_MAX_ENTRIES && (entry = dir.openNextFile())) {
       scanned++;
+      esp_task_wdt_reset(); // slow-but-progressing scan on a healthy card must not
+                            // trip the 45s boot WDT; a real per-file hang still does
       unsigned idx = 0;
       const char *base = strrchr(entry.name(), '/');
       base = base ? base + 1 : entry.name();
