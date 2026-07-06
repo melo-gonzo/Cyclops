@@ -6,6 +6,7 @@
 // unit-tested metrics.h; the ring decimation is the unit-tested history.h.
 
 #include "metrics_svc.h"
+#include "web_assets.gen.h"
 #include "history.h"
 #include "web_auth.h"
 #include "branding.h"
@@ -207,171 +208,11 @@ static void handleSeries() {
   g_server->send(200, "application/json", out);
 }
 
-static const char GRAPHS_PAGE[] PROGMEM = R"HTML(<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>)HTML" DEVICE_NAME R"HTML( - Graphs</title>
-<style>
-*{box-sizing:border-box}
-body{margin:0;background:#11151b;color:#dde3ea;font-family:system-ui,sans-serif;padding:14px}
-#nav{display:flex;gap:6px;align-items:center;margin:0 0 14px;flex-wrap:wrap}
-#nav b{margin-right:10px}
-#nav a{color:#8a94a0;text-decoration:none;padding:6px 12px;border-radius:8px;font-size:.9em}
-#nav a.cur{background:#1d2229;color:#dde3ea}
-.card{background:#171c23;border:1px solid #232a33;border-radius:12px;padding:12px;margin-bottom:14px}
-.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-.rng{padding:5px 12px;border:1px solid #2a313a;background:#1d2229;color:#cdd6df;border-radius:8px;cursor:pointer;font-size:.85em}
-.rng.cur{background:#3d9df0;border-color:#3d9df0;color:#06121f}
-.spacer{flex:1}
-.lnk{color:#8a94a0;cursor:pointer;font-size:.82em;text-decoration:underline}
-#wrap{position:relative}
-canvas{width:100%;height:340px;display:block;background:#0d1116;border-radius:8px}
-#legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:12px}
-.mi{display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85em;padding:3px 6px;border-radius:7px;user-select:none}
-.mi.off{opacity:.4}
-.sw{width:13px;height:13px;border-radius:3px;flex:none}
-.mi .lab{color:#cdd6df}
-.mi .val{color:#8a94a0;font-variant-numeric:tabular-nums}
-#tip{position:absolute;pointer-events:none;display:none;background:#06121f;border:1px solid #2a313a;border-radius:8px;padding:7px 9px;font-size:.78em;z-index:5;min-width:120px}
-#tip .tr{display:flex;justify-content:space-between;gap:12px}
-#tip .tt{color:#8a94a0;margin-bottom:4px}
-.hint{color:#5d6773;font-size:.78em;margin-top:6px}
-body.viewer select,body.viewer input,body.viewer button{pointer-events:none;opacity:.4}
-#vbadge{display:none;background:#2a313a;color:#7fd6a0;border-radius:8px;padding:3px 9px;font-size:.8em}
-body.viewer #vbadge{display:inline-block}
-</style></head><body>
-<div id="nav"></div>
-<div class="card">
-  <div class="bar">
-    <span class="rng" data-s="300">5m</span>
-    <span class="rng" data-s="900">15m</span>
-    <span class="rng cur" data-s="3600">1h</span>
-    <span class="rng" data-s="0">All</span>
-    <select id="retwin" onchange="setRetWin(this.value)" title="device retention: how long graph history is kept. Sets per-bucket resolution at fixed memory; existing history is re-bucketed to the new resolution."
-      style="margin-left:10px;background:#222a33;color:#9aa4b0;border:1px solid #2a313a;border-radius:6px;font-size:.85em;padding:1px 4px">
-      <option value="120">keep 2h</option>
-      <option value="360">keep 6h</option>
-      <option value="720">keep 12h</option>
-      <option value="1440">keep 24h</option>
-    </select>
-    <span class="spacer"></span>
-    <span class="lnk" id="all">all</span>
-    <span class="lnk" id="none">none</span>
-  </div>
-  <div id="wrap"><canvas id="cv"></canvas><div id="tip"></div></div>
-  <div class="hint">Each series is normalized to its own min/max over the window, so every metric shares one plot. Hover for real values; click a metric to toggle it.</div>
-  <div id="legend"></div>
-</div>
-<script>
-let META=[],SEL={},secs=3600,DATA=null,hoverX=-1;
-const cv=document.getElementById("cv"),tip=document.getElementById("tip"),wrap=document.getElementById("wrap");
-const DEFAULT_ON=["temp_c","rssi","cam_fps","motion","audio_trig","video_trig"];
-function fmt(v,u){let s=Math.abs(v)>=100?v.toFixed(0):Math.abs(v)>=10?v.toFixed(1):v.toFixed(2);return s+(u?" "+u:"")}
-async function setRetWin(v){await fetch("/metrics/config?win_min="+v);await loadMeta();await poll();}
-async function loadMeta(){
-  const j=await(await fetch("/metrics/meta")).json();META=j.metrics;
-  document.body.classList.toggle('viewer',!!j.viewer); // read-only: lock controls
-  const rw=document.getElementById("retwin");if(rw&&j.win_min)rw.value=j.win_min;
-  for(const m of META)SEL[m.key]=DEFAULT_ON.includes(m.key);
-  renderLegend();
-}
-function renderLegend(){
-  const L=document.getElementById("legend");L.innerHTML="";
-  for(const m of META){
-    const d=document.createElement("div");d.className="mi"+(SEL[m.key]?"":" off");
-    d.innerHTML='<span class="sw" style="background:'+m.color+'"></span><span class="lab">'+m.label+'</span><span class="val" id="v_'+m.key+'">-</span>';
-    d.onclick=()=>{SEL[m.key]=!SEL[m.key];d.className="mi"+(SEL[m.key]?"":" off");draw()};
-    L.appendChild(d);
-  }
-}
-function metaOf(k){return META.find(m=>m.key===k)}
-function decode(raw,m){return raw/m.scale-m.offset}
-async function poll(){
-  try{
-    const w=cv.clientWidth||700;
-    const r=await fetch("/metrics/series?secs="+secs+"&points="+Math.min(Math.round(w),600));
-    if(r.ok){DATA=await r.json();draw()}
-  }catch(e){}
-}
-function draw(){
-  cv.width=cv.clientWidth||700;cv.height=340;
-  const ctx=cv.getContext("2d"),W=cv.width,H=cv.height,PT=10,PB=22,PL=4,PR=4;
-  ctx.clearRect(0,0,W,H);
-  // grid
-  ctx.strokeStyle="#1b2129";ctx.lineWidth=1;ctx.beginPath();
-  for(let g=0;g<=4;g++){const y=PT+(H-PT-PB)*g/4;ctx.moveTo(PL,y);ctx.lineTo(W-PR,y)}ctx.stroke();
-  if(!DATA){ctx.fillStyle="#8a94a0";ctx.font="12px sans-serif";ctx.fillText("collecting data...",10,24);return}
-  const span=DATA.span_ms||0;
-  // time axis labels
-  ctx.fillStyle="#5d6773";ctx.font="11px sans-serif";ctx.textBaseline="top";
-  const mins=Math.round(span/60000);
-  ctx.textAlign="left";ctx.fillText("-"+(mins>=60?(mins/60).toFixed(mins%60?1:0)+"h":mins+"m"),PL+2,H-16);
-  ctx.textAlign="right";ctx.fillText("now",W-PR-2,H-16);
-  const gx=W-PL-PR,plotW=gx,x0=PL,yT=PT,yH=H-PT-PB;
-  let any=false,latest={};
-  for(const m of META){
-    if(!SEL[m.key])continue;
-    const arr=DATA.series[m.key];if(!arr||arr.length<1)continue;
-    any=true;
-    let lo=Infinity,hi=-Infinity;
-    for(const r of arr){const v=decode(r,m);if(v<lo)lo=v;if(v>hi)hi=v}
-    latest[m.key]=decode(arr[arr.length-1],m);
-    const rng=hi-lo;
-    const xs=arr.length>1?plotW/(arr.length-1):0;
-    ctx.strokeStyle=m.color;ctx.lineWidth=1.6;ctx.beginPath();
-    for(let i=0;i<arr.length;i++){
-      const v=decode(arr[i],m);
-      const norm=rng>1e-6?(v-lo)/rng:0.5;
-      const x=x0+i*xs,y=yT+yH*(1-norm);
-      i?ctx.lineTo(x,y):ctx.moveTo(x,y);
-    }
-    ctx.stroke();
-  }
-  if(!any){ctx.fillStyle="#8a94a0";ctx.font="12px sans-serif";ctx.fillText("no metrics selected",10,24)}
-  // legend live values
-  for(const m of META){
-    const el=document.getElementById("v_"+m.key);if(!el)continue;
-    el.textContent=(m.key in latest)?fmt(latest[m.key],m.unit):"-";
-  }
-  // crosshair + tooltip
-  if(hoverX>=x0&&hoverX<=x0+plotW&&any){
-    const ks=Object.keys(DATA.series).find(k=>SEL[k]&&DATA.series[k]&&DATA.series[k].length);
-    const n=ks?DATA.series[ks].length:0;
-    if(n>0){
-      const idx=Math.round((hoverX-x0)/(plotW/(n-1||1)));
-      const ci=Math.max(0,Math.min(n-1,idx));
-      const cx=x0+ci*(plotW/(n-1||1));
-      ctx.strokeStyle="#3a434f";ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(cx,yT);ctx.lineTo(cx,yT+yH);ctx.stroke();ctx.setLineDash([]);
-      const ageMs=span*(1-ci/(n-1||1));
-      const am=Math.round(ageMs/60000),as=Math.round(ageMs/1000)%60;
-      let rows='<div class="tt">-'+(am?am+"m":"")+as+'s</div>';
-      for(const m of META){
-        if(!SEL[m.key])continue;const arr=DATA.series[m.key];if(!arr||ci>=arr.length)continue;
-        rows+='<div class="tr"><span style="color:'+m.color+'">'+m.label+'</span><span>'+fmt(decode(arr[ci],m),m.unit)+'</span></div>';
-      }
-      tip.innerHTML=rows;tip.style.display="block";
-      let tx=cx+12;if(tx+150>W)tx=cx-150;tip.style.left=tx+"px";tip.style.top=(yT+6)+"px";
-    }
-  }else tip.style.display="none";
-}
-cv.addEventListener("mousemove",e=>{const r=cv.getBoundingClientRect();hoverX=(e.clientX-r.left)*(cv.width/r.width);draw()});
-cv.addEventListener("mouseleave",()=>{hoverX=-1;draw()});
-document.querySelectorAll(".rng").forEach(x=>x.onclick=()=>{
-  document.querySelectorAll(".rng").forEach(y=>y.className="rng");x.className="rng cur";
-  secs=+x.dataset.s;poll();
-});
-document.getElementById("all").onclick=()=>{for(const m of META)SEL[m.key]=true;renderLegend();draw()};
-document.getElementById("none").onclick=()=>{for(const m of META)SEL[m.key]=false;renderLegend();draw()};
-window.addEventListener("resize",draw);
-(async()=>{await loadMeta();await poll();
-setInterval(()=>{if(!document.hidden)poll()},5000); // /metrics/series is the priciest poll; skip it for hidden tabs
-document.addEventListener("visibilitychange",()=>{if(!document.hidden)poll()});})();
-</script><script src="/ui.js"></script>
-<script>buildNav('/graphs')</script>
-</body></html>)HTML";
+// WEB_GRAPHS_HTML now lives in web/graphs.html (compiled in as WEB_GRAPHS_HTML via web/ codegen)
 
 static void handlePage() {
   if (!webAuthCheck(*g_server)) return;
-  g_server->send_P(200, "text/html", GRAPHS_PAGE);
+  g_server->send_P(200, "text/html", WEB_GRAPHS_HTML);
 }
 
 // GET /metrics/config?win_min=N - set the retention window (minutes). Clamped,

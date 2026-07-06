@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%DEVICE_NAME% - Live</title>
+<style>
+body{margin:0 auto;padding:16px;max-width:760px;background:#14171c;color:#dde3ea;font-family:-apple-system,system-ui,sans-serif}
+#bar{display:flex;gap:6px;align-items:center;margin:4px 0 16px;flex-wrap:wrap}
+#bar b{margin-right:10px}
+#bar a,#bar span{color:#8a94a0;text-decoration:none;padding:6px 12px;border-radius:8px;font-size:.9em}
+#bar span.cur{background:#1d2229;color:#dde3ea}
+#bar button{margin-left:auto}
+button{background:#3d9df0;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:.95em;cursor:pointer}
+img{width:100%;display:block;border-radius:10px;background:#000;min-height:120px}
+@media(max-width:600px){
+  body{padding:10px}
+  #bar{gap:4px}#bar b{width:100%;margin:0 0 2px}
+}
+</style></head><body>
+<div id="bar"><b>%DEVICE_NAME%</b>
+  <a href="/">Clips</a><span class="cur">Live</span><a href="/camera">Camera</a><a href="/rec">Record</a><a href="/wifi">WiFi</a><a href="/docs">Docs</a><a href="/jpg">Snapshot</a>
+  <span id="fps" style="color:#5df0a0"></span>
+  <label id="motwrap" style="padding:0;font-size:.85em;color:#8a94a0"><input type="checkbox" id="moton" onchange="motPoll()"> motion</label>
+  <button id="listen" onclick="toggleListen()">&#128264; listen live</button>
+</div>
+<div style="position:relative">
+  <img id="cam" alt="live stream">
+  <canvas id="mot" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none"></canvas>
+</div>
+<script src="/ui.js"></script>
+<script>
+// Robust MJPEG: reads the stream via fetch() and auto-reconnects on stall/drop
+// (a bare <img> would freeze on a half-decoded frame forever). Self-pauses while
+// the tab is hidden; audio keeps playing.
+const camStream=mjpegStream(cam,"/mjpeg/1");camStream.start();
+setInterval(()=>{
+  if(document.hidden)return;
+  fetch("/camera/status").then(r=>r.json()).then(s=>{
+    fps.textContent=s.fps>0?"cam "+s.fps.toFixed(1)+(s.net_fps>0?" · net "+s.net_fps.toFixed(1):"")+" fps":"";
+  }).catch(()=>{});
+},2000);
+// Motion debug overlay: poll the detector's changed-block map and paint it
+// over the stream. Polling itself keeps analysis alive on the device, so
+// this works even with auto-trigger off. Hidden if the board lacks video.
+let _motMiss=0,_motMap=null,_motMapAt=0;
+function drawMot(m){
+  // The device's analysis task can briefly miss its slot under streaming load,
+  // returning an empty map for a poll or two. Reuse the last good map for a
+  // short grace period so the overlay doesn't flicker to "warming up".
+  if(m.map){_motMap=m.map;_motMapAt=Date.now()}
+  else if(_motMap&&Date.now()-_motMapAt<3000)m.map=_motMap;
+  mot.style.display="block";
+  mot.width=cam.clientWidth;mot.height=cam.clientHeight;
+  const ctx=mot.getContext("2d");
+  ctx.clearRect(0,0,mot.width,mot.height);
+  ctx.font="13px monospace";
+  const bit=(hex,b)=>(parseInt(hex.substr((b>>3)*2,2),16)>>(b&7))&1;
+  if(!m.bx){ctx.fillStyle="#8a94a0";ctx.fillText("motion: warming up",10,20);return}
+  const bw=mot.width/m.bx,bh=mot.height/m.by;
+  if(m.mask){ // user-masked blocks (edited on the camera page)
+    ctx.fillStyle="rgba(61,157,240,.3)";
+    for(let b=0;b<m.bx*m.by;b++)
+      if(bit(m.mask,b))ctx.fillRect((b%m.bx)*bw,((b/m.bx)|0)*bh,bw,bh);
+  }
+  if(!m.map){ctx.fillStyle="#8a94a0";ctx.fillText("motion: warming up",10,20);return}
+  ctx.fillStyle="rgba(240,93,93,.22)";ctx.strokeStyle="rgba(240,93,93,.85)";ctx.lineWidth=2;
+  for(let b=0;b<m.bx*m.by;b++){
+    if(bit(m.map,b)){
+      const x=(b%m.bx)*bw,y=((b/m.bx)|0)*bh;
+      ctx.fillRect(x,y,bw,bh);ctx.strokeRect(x,y,bw,bh);
+    }
+  }
+  ctx.fillStyle=m.global?"#f0c95d":m.level>=m.thresh?"#f05d5d":"#5df0a0";
+  ctx.fillText("motion "+m.level+"/"+m.thresh+(m.global?" lighting change":"")
+    +(m.enabled?"":" (trigger off)"),10,20);
+}
+async function motPoll(){
+  if(document.hidden)return;
+  if(!moton.checked){mot.style.display="none";return}
+  try{
+    const r=await fetch("/video/motion");
+    if(!r.ok)throw 0;
+    drawMot(await r.json());_motMiss=0;
+  }catch(e){if(++_motMiss>2){motwrap.style.display="none";mot.style.display="none"}}
+}
+setInterval(motPoll,500);
+</script>
+<script src="/audio/player.js"></script>
+</body></html>

@@ -55,7 +55,15 @@ def generate():
                        os.path.isfile(os.path.join(WEB, f)))
     banner = "// GENERATED from web/ by tools/gen_web_assets.py - DO NOT EDIT.\n"
     h = [banner, "#pragma once\n", "#include <Arduino.h>\n", "\n"]
-    c = [banner, '#include "web_assets.gen.h"\n', "\n"]
+    # branding.h supplies DEVICE_NAME, which pages splice in via the %DEVICE_NAME%
+    # token below (expanded to the same compile-time concatenation as the old
+    # hand-written literals, so the stored bytes are unchanged).
+    c = [banner, '#include "web_assets.gen.h"\n', '#include "branding.h"\n', "\n"]
+    # %DEVICE_NAME% -> break the raw string, concatenate the DEVICE_NAME macro,
+    # reopen it: R"WEBRAW(...)WEBRAW" DEVICE_NAME R"WEBRAW(...)WEBRAW"
+    token_expansions = {
+        "%DEVICE_NAME%": ')%s" DEVICE_NAME R"%s(' % (DELIM, DELIM),
+    }
     for fn in files:
         with open(os.path.join(WEB, fn), "rb") as fp:
             data = fp.read()
@@ -64,10 +72,13 @@ def generate():
             raise SystemExit(
                 "gen_web_assets: raw-string delimiter %r collides in web/%s "
                 "- change DELIM in tools/gen_web_assets.py" % (DELIM, fn))
+        body = text
+        for tok, expansion in token_expansions.items():
+            body = body.replace(tok, expansion)
         s = sym(fn)
         h.append("extern const char %s[];\n" % s)
         h.append("extern const unsigned %s_LEN;\n" % s)
-        c.append('const char %s[] PROGMEM = R"%s(%s)%s";\n' % (s, DELIM, text, DELIM))
+        c.append('const char %s[] PROGMEM = R"%s(%s)%s";\n' % (s, DELIM, body, DELIM))
         c.append("const unsigned %s_LEN = sizeof(%s) - 1;\n\n" % (s, s))
     _write_if_changed(GEN_H, "".join(h))
     _write_if_changed(GEN_C, "".join(c))

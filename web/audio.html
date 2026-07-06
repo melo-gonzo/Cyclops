@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%DEVICE_NAME% - Audio Clips</title>
+<style>
+body{font-family:-apple-system,system-ui,sans-serif;background:#14171c;color:#dde3ea;margin:0;padding:16px;max-width:760px;margin:auto}
+h1{font-size:1.2em;margin:8px 0 16px}
+a{color:#6fb3ff}
+.card{background:#1d2229;border-radius:10px;padding:14px;margin-bottom:14px}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+.stat b{display:block;font-size:1.15em}
+.stat span{font-size:.75em;color:#8a94a0}
+#meterwrap{flex:1;min-width:160px;height:14px;background:#0d0f12;border-radius:7px;overflow:hidden;position:relative}
+#meter{height:100%;width:0;background:#3d9df0;transition:width .25s}
+#meter.hot{background:#f05d5d}
+#thr{position:absolute;top:0;bottom:0;width:2px;background:#ffd24d}
+button{background:#3d9df0;color:#fff;border:0;border-radius:8px;padding:10px 16px;font-size:1em;cursor:pointer}
+button:disabled{opacity:.5}
+label{font-size:.9em;color:#aab4c0}
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:.9em}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #2a313a;white-space:nowrap}
+th{color:#8a94a0;font-weight:500;font-size:.8em}
+.play{width:38px;height:32px;padding:0;font-size:.9em}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.dl{padding:4px 10px;font-size:.85em;background:#2a313a;border-radius:6px;text-decoration:none}
+.src{font-size:.75em;padding:2px 8px;border-radius:10px}
+.auto{background:#3a2f1d;color:#ffd24d}.http{background:#1d3a2a;color:#5df0a0}
+.motion,.video{background:#2d1d3a;color:#c08bff}
+.spectral{background:#3a1d22;color:#f0768a}
+.thumb{width:64px;height:48px;object-fit:cover;border-radius:4px;cursor:pointer;background:#0d0f12;vertical-align:middle;display:block}
+.thumb.big{width:280px;height:auto;position:absolute;z-index:20;box-shadow:0 6px 24px rgba(0,0,0,.6)}
+.pnav{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:.8em;color:#8a94a0}
+.pnav>span:first-child{width:38px}
+.pnav input[type=range]{flex:1;accent-color:#3d9df0;height:22px}
+#plotinfo{margin-top:6px;font-size:.85em;color:#aab4c0;min-height:1.5em;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#empty,#sdempty,#vidempty{color:#8a94a0;padding:12px 0}
+.pgnav{display:none;gap:10px;align-items:center;justify-content:flex-end;margin-top:8px;font-size:.85em;color:#8a94a0}
+.pgnav button{padding:4px 12px;font-size:1em;background:#2a313a}
+h3{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:.85em;color:#8a94a0;font-weight:500;margin:0 0 8px;text-transform:uppercase;letter-spacing:.05em}
+h3>.dl,h3>span{margin-left:auto}
+#nav{display:flex;gap:6px;align-items:center;margin:4px 0 16px}
+#nav b{margin-right:10px}
+#nav a{color:#8a94a0;text-decoration:none;padding:6px 12px;border-radius:8px;font-size:.9em}
+#nav a.cur{background:#1d2229;color:#dde3ea}
+.rng,.tog{color:#8a94a0;text-decoration:none;padding:2px 8px;border-radius:6px;font-size:.85em}
+.rng.cur,.tog.cur{background:#2a313a;color:#dde3ea}
+canvas{width:100%;display:block}
+@media(max-width:600px){
+  body{padding:10px}
+  .card{padding:12px;margin-bottom:10px}
+  .row{gap:8px 10px}
+  #nav{gap:4px;flex-wrap:wrap}#nav b{width:100%;margin:0 0 2px}
+  input,select{font-size:16px}
+}
+/* Read-only viewer: disable every control except those marked .vw (view-only:
+   listen, clip play, plot zoom/scale). Fail-safe - anything unmarked is locked.
+   .adm-hide removes admin-only sections entirely. Toggled by body.viewer. */
+body.viewer input:not(.vw),body.viewer select:not(.vw),body.viewer button:not(.vw),body.viewer textarea:not(.vw){pointer-events:none;opacity:.4}
+body.viewer .adm-hide{display:none!important}
+#vbadge{display:none;background:#2a313a;color:#7fd6a0;border-radius:8px;padding:3px 9px;font-size:.8em}
+body.viewer #vbadge{display:inline-block}
+</style></head><body>
+<div id="nav"></div>
+<div class="card"><h3>Diagnostics</h3><div class="row" id="diag">-</div></div>
+<div class="card"><div class="row">
+  <div class="stat"><b id="rms">-</b><span>RMS</span></div>
+  <div class="stat"><b id="floor">-</b><span>noise floor</span></div>
+  <div class="stat"><b id="threshold">-</b><span id="thrmode">threshold</span></div>
+  <div id="meterwrap"><div id="meter"></div><div id="thr"></div></div>
+  <button id="listen" class="vw" onclick="toggleListen()" style="font-size:.85em;padding:6px 12px">&#128264; listen live</button>
+  <span id="lvwitness" style="display:none;font-size:.8em;color:#7fd6a0">&#9654; playing <span id="lvbar" style="display:inline-block;width:64px;height:9px;background:#0d0f12;border-radius:4px;overflow:hidden;vertical-align:middle"><span id="lvfill" style="display:block;height:100%;width:0;background:#7fd6a0"></span></span></span>
+  <button onclick="retune()" style="font-size:.85em;padding:6px 12px;background:#2a313a" title="forget the learned noise floor and re-learn from current ambient">re-tune</button>
+  <label>manual thr <input type="number" id="mthrIn" min="0" max="32767" title="trigger threshold override; 0 = adaptive" style="width:70px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <button onclick="applyMthr()" style="font-size:.85em;padding:6px 12px">apply</button>
+  <label>min thr <input type="number" id="minthrIn" min="0" max="32767" title="floor under the adaptive threshold so quiet rooms aren't hair-trigger; 0 = pure adaptive (floor x factor)" style="width:70px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <button onclick="applyMinThr()" style="font-size:.85em;padding:6px 12px">apply</button>
+  <label>auto algo <select id="algoIn" onchange="applyAlgo()" title="how the adaptive threshold is computed: floor x factor (level only) or mean + k&middot;&sigma; (adapts to how VARIABLE the room is - a busy room auto-raises its own bar)" style="background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"><option value="0">floor &times; factor</option><option value="1">mean + k&middot;&sigma;</option></select></label>
+  <span id="facWrap"><label>factor &times;<input type="number" id="factorIn" min="1.2" max="20" step="0.1" title="adaptive threshold = noise floor x this factor; HIGHER = less sensitive" style="width:60px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <button onclick="applyFactor()" style="font-size:.85em;padding:6px 12px">apply</button></span>
+  <span id="kWrap" style="display:none"><label>k&times;<input type="number" id="kIn" min="0.5" max="12" step="0.5" title="k = how many standard deviations (sigma) above the average level to set the threshold. threshold = mean + k&middot;sigma. HIGHER k = FEWER triggers. sigma is MEASURED from the room (you can't set it); k is the knob you turn." style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <label>win min<input type="number" id="statWinIn" min="0.25" max="240" step="0.25" title="averaging window (minutes) the mean &amp; sigma are computed over. SHORTER = reacts faster to the room changing; LONGER = steadier, ignores brief events, good for long ambient horizons. Exponential, so this is the time-constant." style="width:60px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <button onclick="applyK()" style="font-size:.85em;padding:6px 12px">apply</button>
+  <span id="statLive" style="font-size:.78em;color:#8a94a0"></span></span>
+  <label>mic gain &times;<input type="number" id="gainIn" min="1" max="64" step="1" title="digital gain on the PDM mic; the raw output is very quiet. Trigger thresholds scale with it." style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <button onclick="applyGain()" style="font-size:.85em;padding:6px 12px">apply</button>
+  <label title="high-pass filter: rolls off sub-bass rumble / HVAC / DC drift on the live stream, recorded clips, and the level metric"><input type="checkbox" id="hpfEn" onchange="applyHpf()"> high-pass</label>
+  <input type="range" id="hpfHz" min="30" max="2000" step="10" value="120" oninput="hpfDrag()" onchange="applyHpf()" title="cutoff frequency; drag while listening to audition the effect locally before applying" style="vertical-align:middle;width:120px">
+  <input type="number" id="hpfHzv" min="30" max="2000" step="10" value="120" onchange="hpfBox()" title="cutoff frequency in Hz (30-2000); type a value or use the slider" style="width:62px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:5px"><span class="note">Hz</span>
+  <label title="low-pass filter: rolls off high-frequency hiss/static on the live stream, recorded clips, and the level metric"><input type="checkbox" id="lpfEn" onchange="applyLpf()"> low-pass</label>
+  <input type="range" id="lpfHz" min="200" max="7800" step="50" value="4000" oninput="lpfDrag()" onchange="applyLpf()" title="cutoff frequency; drag while listening to audition the effect locally before applying" style="vertical-align:middle;width:120px">
+  <input type="number" id="lpfHzv" min="200" max="7800" step="50" value="4000" onchange="lpfBox()" title="cutoff frequency in Hz (200-7800); type a value or use the slider" style="width:62px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:5px"><span class="note">Hz</span>
+</div></div>
+<div class="card">
+  <h3>Event plot
+    <span style="float:right;font-weight:400">
+      <select id="histwin" onchange="setHistWin(this.value)" title="device retention: how far back level/threshold history is kept. Sets the per-bucket resolution at fixed memory; existing history is re-bucketed to the new resolution."
+        style="background:#222a33;color:#9aa4b0;border:1px solid #2a313a;border-radius:6px;font-size:.85em;padding:1px 4px">
+        <option value="360">keep 6h</option>
+        <option value="720">keep 12h</option>
+        <option value="1440">keep 24h</option>
+        <option value="2880">keep 48h</option>
+        <option value="4320">keep 72h</option>
+      </select>
+    </span></h3>
+  <div id="ep"></div>
+</div>
+<div class="card">
+  <h3>Live spectrum
+    <span style="float:right;font-weight:400;font-size:.85em">
+      <a href="#" id="scaletog" class="tog" title="amplitude axis: 'dB rel' = dB below the loudest current band (0 at top) · 'dBFS' = true level in dBFS, auto-scaled so the loudest band is at top · 'linear' = raw amplitude vs peak. Display only - triggering always uses raw magnitude.">dB rel</a>
+      <a href="#" id="filttog" class="tog" title="Off: raw mic signal BEFORE the low-pass (where the noise really is). On: overlay the low-pass effect, i.e. what the stream &amp; clips actually contain.">show filtered</a>
+    </span></h3>
+  <canvas id="spec" height="150" style="cursor:crosshair"></canvas>
+  <div id="spectip" style="position:fixed;display:none;pointer-events:none;z-index:20;background:#0d0f12;border:1px solid #2a313a;border-radius:6px;padding:6px 9px;font-size:.78em;line-height:1.45;color:#dde3ea;white-space:nowrap;box-shadow:0 2px 8px #000a"></div>
+  <div id="specpin" style="display:none;font-size:.8em;color:#cdd6df;margin-top:4px"></div>
+  <canvas id="spech" height="120" title="spectrogram history: time runs left→right, frequency bottom→top, brighter = louder" style="margin-top:6px"></canvas>
+  <div id="specnote" style="font-size:.8em;color:#8a94a0;margin-top:4px"></div>
+  <div class="row" style="margin-top:8px">
+    <label title="record a clip when any frequency band rises above its own adaptive threshold (the grey step line) - catches tonal events the overall RMS trigger misses"><input type="checkbox" id="strig" onchange="applySpec()"> band trigger</label>
+    <label>sensitivity &times;<input type="number" id="sfac" min="1.5" max="100" step="0.5" onchange="applySpec()" title="per-band threshold = that band's learned floor x this factor; HIGHER = less sensitive (needs a bigger jump over the floor to fire)" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+    <label title="advanced: absolute floor (FFT magnitude units, not RMS) a band's threshold can never drop below, so a dead-quiet band can't become a hair-trigger. Leave at the default unless tuning against the plot.">min mag <input type="number" id="sminmag" min="0" max="10000000" step="500" onchange="applySpec()" style="width:80px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+    <label title="how slowly each band's threshold line (grey) adapts to the ambient: a per-band EMA over this many minutes. Larger = slower/steadier line; smaller = quicker to follow level changes.">band avg <input type="number" id="bandtc" min="0.05" max="30" step="0.25" onchange="applySpec()" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"> min</label>
+    <label title="habituation: a SUSTAINED sound is slowly learned as the new background and stops re-triggering after roughly this many minutes (slow-rise noise floor). Applies to BOTH the band and overall-level triggers. 0 = off: steady sounds keep firing until you Retune.">habituate <input type="number" id="habmin" min="0" max="120" step="0.5" onchange="applySpec()" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"> min</label>
+    <label title="how much time the spectrogram heatmap spans; longer = coarser per-column. Changing it restarts the heatmap.">history <input type="number" id="shist" min="1" max="120" step="1" onchange="applySpec()" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"> min</label>
+    <button onclick="applySpec()" style="font-size:.85em;padding:6px 12px">apply</button>
+  </div>
+</div>
+<div class="card"><div class="row">
+  <label><input type="checkbox" id="auden" onchange="setAudEn()" title="master switch: mic capture, all audio triggers and live listening; video keeps running"> enable audio</label>
+  <button id="rec" onclick="trigger()">&#9210; Record clip now</button>
+  <label><input type="checkbox" id="auto" onchange="setAuto()"> auto-trigger on noise</label>
+  <label>clip <input type="number" id="clipIn" min="0.5" max="10" step="0.5" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px">s</label>
+  <label>pre-roll <input type="number" id="preIn" min="0" max="9.5" step="0.5" title="seconds kept from before the trigger" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px">s</label>
+  <button onclick="applyLen()" style="font-size:.85em;padding:6px 12px">apply</button>
+  <span id="recState" style="color:#f05d5d"></span>
+</div></div>
+<div class="card"><div class="row">
+  <label>clip slots <input type="number" id="slotsIn" min="1" style="width:60px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <button onclick="applySlots()">apply</button>
+  <span id="mem" style="font-size:.85em;color:#8a94a0"></span>
+</div>
+<div class="row" style="margin-top:10px">
+  <label><input type="checkbox" id="sdsave" onchange="setSd()"> save clips to SD card</label>
+  <label>max SD clips <input type="number" id="sdmaxIn" min="0" title="0 = unlimited" style="width:70px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+  <button onclick="applySdMax()">apply</button>
+  <span id="sdinfo" style="font-size:.85em;color:#8a94a0"></span>
+  <button id="sdretry" onclick="remountSd()" style="display:none;font-size:.85em;padding:6px 12px">retry SD</button>
+</div></div>
+<div class="card">
+  <h3>Recent clips (RAM &mdash; cleared on reboot)
+    <a class="dl" href="#" onclick="clearRam();return false" style="float:right;color:#f05d5d">clear all</a></h3>
+  <div class="tblwrap"><table><thead><tr><th>ID</th><th>Captured</th><th>Trigger</th><th>Over thr</th><th>Listen</th><th></th></tr></thead>
+  <tbody id="clips"></tbody></table></div>
+  <div id="clipsnav" class="pgnav"></div>
+  <div id="empty">No clips yet.</div>
+</div>
+<div class="card" id="sdcard" style="display:none">
+  <h3>SD card clips
+    <a class="dl" href="#" onclick="clearSd();return false" style="float:right;color:#f05d5d">clear all</a></h3>
+  <div class="tblwrap"><table><thead><tr><th>Key</th><th>File</th><th>Time</th><th>Trigger</th><th>Over thr</th><th>Size</th><th>Listen</th><th></th><th></th></tr></thead>
+  <tbody id="sdclips"></tbody></table></div>
+  <div id="sdnav" class="pgnav"></div>
+  <div id="sdempty">No files on SD.</div>
+</div>
+<div class="card">
+  <h3>Video clips
+    <a class="dl" href="#" onclick="clearVid();return false" style="float:right;color:#f05d5d">clear all</a></h3>
+  <div class="row" style="margin-bottom:8px">
+    <label><input type="checkbox" id="viden" onchange="setVidEn()"> enable video recording</label>
+    <label title="Master switch: off = audio-only, camera stays parked (cooler)"><input type="checkbox" id="strmen" onchange="setStrmEn()"> live stream</label>
+    <button id="vrec" onclick="vidTrigger()" style="font-size:.85em;padding:6px 12px">&#9210; record now</button>
+    <span id="vidState" style="color:#f05d5d"></span>
+    <span id="vidinfo" style="font-size:.85em;color:#8a94a0"></span>
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <label>clip <input type="number" id="vclipIn" min="2" max="60" step="1" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px">s</label>
+    <label>pre-roll <input type="number" id="vpreIn" min="0" max="8" step="0.5" title="seconds kept from before the trigger" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px">s</label>
+    <label>fps <input type="number" id="vfpsIn" min="2" max="10" style="width:50px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+    <label>max files <input type="number" id="vmaxIn" min="0" title="0 = unlimited" style="width:60px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+    <button onclick="applyVidCfg()" style="font-size:.85em;padding:6px 12px">apply</button>
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <label><input type="checkbox" id="vonaud" onchange="fetch('/video/config?on_audio='+(vonaud.checked?1:0)).catch(()=>{})"> video on audio trigger</label>
+    <label><input type="checkbox" id="vtrigaud" onchange="fetch('/video/config?trig_audio='+(vtrigaud.checked?1:0)).catch(()=>{})"> audio on video trigger</label>
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <label title="Minimum gap after an automatic clip before motion/audio can trigger another. 0 = no limit. Caps how many clips record per period; manual 'record now' always works."> min gap <input type="number" id="vgapIn" min="0" max="3600" step="1" style="width:60px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px">s</label>
+    <label title="Separate cap on how often an audio trigger may also start a video clip (0 = off)">audio&rarr;video cooldown <input type="number" id="vxtrigIn" min="0" max="3600" step="1" style="width:60px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px">s</label>
+    <button onclick="applyRateCfg()" style="font-size:.85em;padding:6px 12px">apply</button>
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <label title="Auto-pause video recording when the die runs too hot (protects the over-temp PSRAM). Leave on unless you have active cooling."><input type="checkbox" id="vthen" onchange="setThEn()"> thermal throttle</label>
+    <label>cutoff <input type="number" id="vthIn" min="60" max="125" step="1" title="pause video above this die temp (&deg;C); resumes 8&deg;C below" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px">&deg;C</label>
+    <button onclick="applyThCfg()" style="font-size:.85em;padding:6px 12px">apply</button>
+    <span id="thState" style="font-size:.85em;color:#ffb84d"></span>
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <label><input type="checkbox" id="vmot" onchange="setVidMot()"> on-device motion detect</label>
+    <label>blocks <input type="number" id="vmotIn" min="1" max="3072" title="changed blocks needed to trigger; lower = more sensitive" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+    <label>pixel diff <input type="number" id="vdiffIn" min="3" max="60" title="avg luma delta for a block to count as changed; lower = more sensitive" style="width:55px;background:#0d0f12;color:#dde3ea;border:1px solid #2a313a;border-radius:6px;padding:6px"></label>
+    <button onclick="applyVidMot()" style="font-size:.85em;padding:6px 12px">apply</button>
+    <span id="motlvl" style="font-size:.85em;color:#8a94a0"></span>
+  </div>
+  <div class="tblwrap"><table><thead><tr><th>Key</th><th>File</th><th>Time</th><th>Trigger</th><th>Size</th><th>Watch</th><th>Audio</th><th></th><th></th></tr></thead>
+  <tbody id="vidclips"></tbody></table></div>
+  <div id="vidnav" class="pgnav"></div>
+  <div id="vidempty">No video clips.</div>
+</div>
+<div id="vplayer" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:10;padding:16px;box-sizing:border-box" onclick="if(event.target===this)closeVid()">
+  <div style="max-width:900px;margin:24px auto;background:#1d2229;border-radius:10px;padding:14px">
+    <canvas id="vcv"></canvas>
+    <div class="row" style="margin-top:10px">
+      <button id="vpp" onclick="vidPlayPause()" style="width:44px">&#9208;</button>
+      <input type="range" id="vseek" min="0" value="0" style="flex:1;min-width:120px">
+      <span id="vfr" style="font-size:.85em;color:#8a94a0"></span>
+      <button id="vaud" onclick="vidAudioToggle()" style="display:none;background:#2a313a" title="play the paired audio clip">&#128264;</button>
+      <button onclick="closeVid()" style="background:#2a313a">close</button>
+    </div>
+  </div>
+</div>
+<script src="/ui.js"></script>
+<script>
+// Escape device strings before they hit innerHTML (firmware-generated, but a stray quote must not corrupt a row).
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function age(ms){if(ms<60000)return Math.round(ms/1000)+"s ago";if(ms<3600000)return Math.round(ms/60000)+"m ago";return (ms/3600000).toFixed(1)+"h ago"}
+const _p2=n=>String(n).padStart(2,"0");
+function fmtTs(t){const d=new Date(t);
+  return d.getFullYear()+"-"+_p2(d.getMonth()+1)+"-"+_p2(d.getDate())+" "+_p2(d.getHours())+":"+_p2(d.getMinutes())+":"+_p2(d.getSeconds())}
+function fmtHM(t){const d=new Date(t);return _p2(d.getHours())+":"+_p2(d.getMinutes())}
+let _sdCount=-1,_wasRec=false,_sdAudio=[];
+// Client-side pagination: 10 rows per table, page state kept across polls.
+const PG=10;let _pg={},_pgD={};
+function page(k,items,render,tb,nav,emptyEl){
+  _pgD[k]=[items,render,tb,nav,emptyEl];
+  const n=items.length,maxP=Math.max(0,Math.ceil(n/PG)-1);
+  if(!(k in _pg))_pg[k]=0;
+  if(_pg[k]>maxP)_pg[k]=maxP;
+  const p=_pg[k],s=p*PG;
+  emptyEl.style.display=n?"none":"block";
+  // Only touch the DOM when the rendered rows actually changed: assigning even an
+  // identical innerHTML recreates every element, which refetches thumbnails and
+  // restarts their lazy-load (visible as flicker on each 10s refresh).
+  const html=items.slice(s,s+PG).map(render).join("");
+  if(tb._h!==html){tb._h=html;tb.innerHTML=html}
+  nav.style.display=n>PG?"flex":"none";
+  nav.innerHTML=n>PG?
+    "<button onclick=\"pgMove('"+k+"',-1)\""+(p?"":" disabled")+">&#8249; prev</button>"+
+    "<span>"+(s+1)+"&ndash;"+Math.min(s+PG,n)+" of "+n+"</span>"+
+    "<button onclick=\"pgMove('"+k+"',1)\""+(p<maxP?"":" disabled")+">next &#8250;</button>":"";
+}
+function pgMove(k,d){_pg[k]+=d;page(k,..._pgD[k])}
+async function applySdMax(){
+  await fetch("/audio/config?sd_max="+sdmaxIn.value);
+  refreshSd();refreshStatus();
+}
+// The status poll runs every 2s and writes the config inputs from the device.
+// Don't clobber a control the user is actively setting: hold a field for ~12s
+// after its last edit (the focus check alone isn't enough - on mobile the
+// keyboard-dismiss blurs the field before you reach 'apply', and the next poll
+// would snap it back). The apply functions read the field, so once the device
+// value matches, the hold expiring is a no-op.
+var _lastEdit={};
+document.addEventListener('input',e=>{if(e.target&&e.target.id)_lastEdit[e.target.id]=Date.now()},true);
+function _hold(el){return !el||document.activeElement===el||(_lastEdit[el.id]&&Date.now()-_lastEdit[el.id]<12000);}
+async function refreshStatus(){
+  try{
+    const s=await(await fetch("/audio/status")).json();
+    document.body.classList.toggle('viewer',!!s.viewer); // read-only: lock controls
+    rms.textContent=Math.round(s.rms);
+    floor.textContent=Math.round(s.noise_floor);
+    threshold.textContent=Math.round(s.threshold);
+    thrmode.textContent=s.manual_thr>0?"threshold (manual)":"threshold (auto)";
+    if(!_hold(mthrIn))mthrIn.value=Math.round(s.manual_thr);
+    if(!_hold(factorIn))factorIn.value=s.factor;
+    if(s.algo!=null){if(!_hold(algoIn))algoIn.value=s.algo;
+      if(!_hold(kIn)&&s.trig_k!=null)kIn.value=s.trig_k;
+      if(!_hold(statWinIn)&&s.stat_win!=null)statWinIn.value=s.stat_win;
+      facWrap.style.display=s.algo==1?"none":"";kWrap.style.display=s.algo==1?"":"none";
+      if(s.algo==1&&s.sigma!=null){
+        // Show the MEASURED sigma and the raw mean+k*sigma so it's obvious when the
+        // min-thr floor is the thing actually setting the threshold (k looks "dead").
+        const raw=s.noise_floor+s.trig_k*s.sigma;
+        statLive.textContent="σ="+s.sigma.toFixed(0)+" · mean+k·σ="+Math.round(raw)+
+          (raw<s.min_thr?" → clamped to min thr "+Math.round(s.min_thr):"");
+      }}
+    if(!_hold(gainIn))gainIn.value=Math.round(s.gain);
+    if(!_hold(minthrIn))minthrIn.value=Math.round(s.min_thr);
+    if(!_hold(lpfEn))lpfEn.checked=s.lpf;
+    if(!_hold(lpfHz)&&!_hold(lpfHzv)){lpfHz.value=Math.round(s.lpf_hz);lpfHzv.value=Math.round(s.lpf_hz);}
+    if(!_hold(hpfEn))hpfEn.checked=s.hpf;
+    if(!_hold(hpfHz)&&!_hold(hpfHzv)){hpfHz.value=Math.round(s.hpf_hz);hpfHzv.value=Math.round(s.hpf_hz);}
+    if(!_hold(clipIn))clipIn.value=s.clip_ms/1000;
+    if(!_hold(preIn))preIn.value=s.preroll_ms/1000;
+    auto.checked=s.auto;
+    auden.checked=s.enabled;
+    rec.disabled=!s.enabled;
+    auto.disabled=!s.enabled;
+    listen.disabled=!s.enabled&&!_ac;
+    recState.textContent=s.recording?"● recording":s.enabled?"":"audio off";
+    if(_wasRec&&!s.recording)setTimeout(()=>{refreshClips();refreshSd();window.ep&&ep.reload()},1500);
+    _wasRec=s.recording;
+    const span=Math.max(s.threshold*2,1);
+    meter.style.width=Math.min(100,s.rms/span*100)+"%";
+    meter.className=s.rms>s.threshold?"hot":"";
+    thr.style.left=Math.min(100,s.threshold/span*100)+"%";
+    slotsIn.max=s.max_slots;
+    if(!_hold(slotsIn))slotsIn.value=s.slots;
+    const mb=(s.slot_bytes/1048576).toFixed(2);
+    mem.textContent="recommended max "+s.recommended_slots+" ("+mb+"MB each, "
+      +(s.free_psram/1048576).toFixed(1)+"MB PSRAM free)";
+    sdsave.checked=s.save_to_sd;
+    sdsave.disabled=!s.sd;
+    if(!_hold(sdmaxIn))sdmaxIn.value=s.sd_max_clips;
+    sdinfo.textContent=s.sd?("SD: "+s.sd_used_mb+" / "+s.sd_total_mb+" MB used"
+      +(_sdCount>=0?" · "+_sdCount+" clips":"")
+      +(s.sd_max_clips>0?" (cap "+s.sd_max_clips+")":" (no cap)"))
+      :"no SD card detected — auto-retrying…";
+    sdcard.style.display=s.sd?"block":"none";
+    sdretry.style.display=s.sd?"none":"inline-block";
+  }catch(e){}
+}
+async function remountSd(){
+  sdretry.disabled=true;
+  try{await fetch("/sd/remount")}catch(e){}
+  sdretry.disabled=false;
+  refreshStatus();refreshSd();
+}
+// "1.9x" over the trigger threshold, with the raw post-gain RMS/threshold.
+function ovr(rms,thr){
+  if(rms==null||!thr||thr<=0)return "<span class='note'>&mdash;</span>";
+  rms=+rms;thr=+thr; // coerce numeric before interpolating
+  return "<b>"+(rms/thr).toFixed(1)+"&times;</b> <span class='note'>"+rms+"/"+thr+"</span>";
+}
+// Per-clip key-frame thumbnail cell. The .jpg sidecar shares the clip's name;
+// lazy-loaded so a whole table doesn't fetch at once, and clicking toggles an
+// enlarged overlay. A load error retries a few times with backoff (so a transient
+// "sd busy" 503 doesn't blank it) before giving up - a genuinely missing sidecar
+// (older clips, or the camera had no frame) then just removes itself.
+const _noThumb=new Set(); // clips confirmed to have no .jpg sidecar (pre-feature
+                          // files): never re-request them, or every table rebuild
+                          // would restart the fetch-fail-retry cycle (UI flicker).
+function thumbCell(name){
+  const j=encodeURIComponent(name.replace(/\.(wav|avi)$/,".jpg"));
+  if(_noThumb.has(j))return "";
+  return "<img class=thumb loading=lazy alt=key data-n='"+j+"' src='/sd/file?name="+j+
+    "' onerror='thumbErr(this)' onclick='this.classList.toggle(\"big\")'>";
+}
+function thumbErr(img){
+  const t=(+img.dataset.t||0)+1;
+  if(t>3){_noThumb.add(img.dataset.n);img.remove();return} // no sidecar: give up for good
+  img.dataset.t=t;
+  setTimeout(()=>{img.src="/sd/file?name="+img.dataset.n+"&r="+Date.now()},500*t);
+}
+async function refreshSd(){
+  if(window._clipAudio)return; // don't rebuild rows mid-playback
+  try{
+    // Over-threshold data per clip number, from the SD-persisted store (survives
+    // reboots, covers every saved clip) - {"<num>":[rms,thr,hz]}. Replaces the old
+    // RAM-event-log source, which was wiped on reboot (only newest clip showed).
+    try{window._sdMeta=await(await fetch("/audio/clipmeta")).json();}catch(e){window._sdMeta=window._sdMeta||{}}
+    const r=await fetch("/sd/list");
+    if(!r.ok)return;
+    const c=await r.json();
+    _sdCount=c.length;
+    _sdAudio=c; // kept for pairing audio with video clips by mtime
+    c.sort((a,b)=>b.name.localeCompare(a.name));
+    page("sd",c,x=>{
+      const m=x.name.match(/_(a|h|v|s)\.wav$/);
+      const src=m?{a:"auto",h:"http",v:"video",s:"spectral"}[m[1]]:null;
+      // Over-threshold [rms,thr,hz] keyed by SD file number, from clipmeta (above).
+      // Clips written by older firmware (before this was persisted) show "—".
+      // Coerce to a number so the zero-padded filename digits ("00863") match the
+      // clipmeta keys, which are the bare integer ("863", from String(num)).
+      const idm=x.name.match(/clip_(\d+)_/);
+      const e=(idm&&window._sdMeta)?window._sdMeta[+idm[1]]:null;
+      const en=encodeURIComponent(x.name);
+      return "<tr><td style='position:relative'>"+thumbCell(x.name)+"</td><td>"+esc(x.name)+"</td>"+
+      "<td>"+(x.mtime>1600000000?fmtTs(x.mtime*1000):"&mdash;")+"</td>"+
+      "<td>"+(src?"<span class='src "+src+"'>"+src+"</span>"+(src=='spectral'&&e&&e[2]?" <span class='note'>"+(+e[2])+" Hz</span>":""):"<span class='src'>&mdash;</span>")+"</td>"+
+      "<td>"+ovr(e?e[0]:null,e?e[1]:null)+"</td>"+
+      "<td>"+Math.round(x.size/1024)+"KB</td>"+
+      "<td><button class='play vw' aria-label='play clip' onclick=\"playClip('/sd/file?name="+en+"',this)\">&#9654;</button></td>"+
+      "<td><a class='dl' href='/sd/file?name="+en+"&dl=1'>&#8595; wav</a></td>"+
+      "<td><a class='dl' href='#' onclick=\"delSd('"+en+"');return false\" style='color:#f05d5d'>&#10005;</a></td></tr>"},sdclips,sdnav,sdempty);
+  }catch(e){}
+}
+async function delSd(n){await fetch("/sd/delete?name="+n);refreshSd();refreshStatus()}
+async function clearRam(){
+  if(!confirm("Delete all clips from RAM?"))return;
+  await fetch("/audio/clear");refreshClips();
+}
+async function clearSd(){
+  if(!confirm("Delete ALL clips from the SD card? This cannot be undone."))return;
+  await fetch("/sd/clear");refreshSd();refreshStatus();
+}
+function setSd(){fetch("/audio/config?sd="+(sdsave.checked?1:0))}
+async function applySlots(){
+  await fetch("/audio/config?slots="+slotsIn.value);
+  refreshStatus();refreshClips();
+}
+async function refreshClips(){
+  if(window._clipAudio)return; // don't rebuild rows mid-playback
+  try{
+    const c=await(await fetch("/audio/clips")).json();
+    c.sort((a,b)=>b.id-a.id);
+    page("ram",c,x=>
+      "<tr><td>#"+(+x.id)+"</td><td title='"+age(x.age_ms)+"'>"+fmtTs(Date.now()-x.age_ms)+"</td>"+
+      "<td><span class='src "+esc(x.source)+"'>"+esc(x.source)+"</span>"+(x.source=='spectral'&&x.hz?" <span class='note'>"+(+x.hz)+" Hz</span>":"")+"</td>"+
+      "<td>"+ovr(x.rms,x.thr)+"</td>"+
+      "<td><button class='play vw' aria-label='play clip' onclick=\"playClip('/audio/clip?id="+(+x.id)+"',this)\">&#9654;</button></td>"+
+      "<td><a class='dl' href='/audio/clip?id="+(+x.id)+"&dl=1'>&#8595; wav</a></td></tr>",clips,clipsnav,empty);
+  }catch(e){}
+}
+async function trigger(){
+  rec.disabled=true;
+  try{
+    const r=await(await fetch("/audio/trigger")).json();
+    setTimeout(()=>{refreshClips();rec.disabled=false},r.ready_in_ms+400);
+  }catch(e){rec.disabled=false}
+}
+function setAuto(){fetch("/audio/config?auto="+(auto.checked?1:0))}
+async function setAudEn(){
+  if(!auden.checked&&_ac)stopListen();
+  await fetch("/audio/config?en="+(auden.checked?1:0));
+  refreshStatus();
+}
+async function retune(){await fetch("/audio/retune");refreshStatus()}
+async function applyMthr(){
+  await fetch("/audio/config?manual_thr="+(mthrIn.value||0));
+  refreshStatus();
+}
+async function applyFactor(){
+  await fetch("/audio/config?factor="+(factorIn.value||3));
+  refreshStatus();
+}
+async function applyAlgo(){
+  await fetch("/audio/config?algo="+(algoIn.value||0));
+  refreshStatus();
+}
+async function applyK(){
+  await fetch("/audio/config?trig_k="+(kIn.value||2.5)+"&stat_win="+(statWinIn.value||1));
+  refreshStatus();
+}
+async function applyGain(){
+  await fetch("/audio/config?gain="+(gainIn.value||16));
+  refreshStatus();
+}
+async function applyLpf(){
+  await fetch("/audio/config?lpf="+(lpfEn.checked?1:0)+"&lpf_hz="+(lpfHz.value||4000));
+  // Now committed server-side (stream + clips + level metric). Drop the local
+  // audition filter so you hear the REAL device-filtered stream, not it stacked
+  // on top.
+  if(window.clientLpf)clientLpf(false,0);
+  refreshStatus();drawSpectrum();drawSpectrogram();
+}
+// Live audition: while DRAGGING, only the local monitor is filtered (instant,
+// before the device round-trip) so you can pick a value by ear - the device
+// stream/clips are unchanged until you release (applyLpf commits them).
+function lpfDrag(){
+  lpfHzv.value=lpfHz.value;
+  if(window.clientLpf)clientLpf(true,+lpfHz.value);
+}
+// Typed cutoff: clamp to the slider's range, sync the slider, then commit.
+function lpfBox(){
+  let v=Math.round(+lpfHzv.value||4000);
+  v=Math.max(+lpfHz.min,Math.min(+lpfHz.max,v));
+  lpfHzv.value=v;lpfHz.value=v;applyLpf();
+}
+async function applyHpf(){
+  await fetch("/audio/config?hpf="+(hpfEn.checked?1:0)+"&hpf_hz="+(hpfHz.value||120));
+  if(window.clientHpf)clientHpf(false,0); // committed server-side; drop local preview
+  refreshStatus();drawSpectrum();drawSpectrogram();
+}
+function hpfDrag(){
+  hpfHzv.value=hpfHz.value;
+  if(window.clientHpf)clientHpf(true,+hpfHz.value);
+}
+function hpfBox(){
+  let v=Math.round(+hpfHzv.value||120);
+  v=Math.max(+hpfHz.min,Math.min(+hpfHz.max,v));
+  hpfHzv.value=v;hpfHz.value=v;applyHpf();
+}
+async function applyMinThr(){
+  await fetch("/audio/config?min_thr="+(minthrIn.value||0));
+  refreshStatus();
+}
+async function applyLen(){
+  const r=await fetch("/audio/config?clip_ms="+Math.round((clipIn.value||5)*1000)
+    +"&preroll_ms="+Math.round((preIn.value||0)*1000));
+  if(!r.ok)alert(await r.text());
+  refreshStatus();
+}
+// Event plot: the shared component (/ui.js, same one the camera board uses) bound
+// to the audio level history + trigger events. SD clips are merged as extra
+// markers (extraMarks); the clips table's over-threshold column is fed via
+// onEvents (window._evBySd); clicking a marker plays that clip (onMarker).
+buildNav('/'); // shared top nav (/ui.js)
+window.ep=EventPlot(document.getElementById('ep'),{
+  historyUrl:q=>'/audio/history'+q,
+  eventsUrl:s=>'/audio/events?secs='+s,
+  hasLog:true,
+  onEvents:base=>{window._evBySd={};window._seenSd=new Set();for(const e of base)if(e.sd>=0){_evBySd[e.sd]=e;_seenSd.add(e.sd)}},
+  extraMarks:async secs=>{try{
+    if(Date.now()-(window._sdFilesAt||0)>15000){const sr=await fetch('/sd/list');if(sr.ok){const list=await sr.json(),sf=[];for(const f of list){const nm=f.name.match(/clip_(\d+)_(a|h|v|s)\.wav$/);if(nm&&f.mtime>1600000000)sf.push({num:+nm[1],mtime:f.mtime,source:{a:'auto',h:'http',v:'video',s:'spectral'}[nm[2]]})}window._sdFiles=sf;window._sdFilesAt=Date.now()}}
+    const out=[],nowS=Date.now()/1000,seen=window._seenSd||new Set();
+    for(const f of (window._sdFiles||[])){if(seen.has(f.num))continue;const age=(nowS-f.mtime)*1000;if(age<0||age>secs*1000)continue;out.push({age_ms:age,source:f.source,id:null,sd:f.num,rms:null,thr:null})}
+    return out;
+  }catch(e){return[]}},
+  // Prefer the PERSISTENT SD file (same source the SD-clips table plays) so older
+  // events load reliably; the RAM ring only keeps the newest few clips, so playing
+  // by RAM id 404s for almost every marker. Fall back to RAM id only when the event
+  // has no SD clip (e.g. save-to-SD off). playClip(url,btn) gives the same spinner/
+  // retry/stop behavior as the tables.
+  onMarker:(ev,btn)=>{const L={auto:'a',http:'h',video:'v',spectral:'s'};const u=ev.sd>=0?'/sd/file?name=clip_'+String(ev.sd).padStart(5,'0')+'_'+(L[ev.source]||'a')+'.wav':(ev.id!=null?'/audio/clip?id='+ev.id:null);if(u&&window.playClip)playClip(u,btn||null)}
+});
+filttog.onclick=e=>{
+  e.preventDefault();
+  filttog.classList.toggle("cur");
+  try{localStorage.setItem("filttog",filttog.classList.contains("cur")?"1":"0")}catch(e){}
+  drawSpectrum();drawSpectrogram(); // redraw in the new view immediately
+};
+// Restore the persisted "show filtered" choice; the regular spectrum poll then
+// draws in this view (class set before the first draw, so no extra redraw needed).
+if(window.localStorage&&localStorage.getItem("filttog")=="1")filttog.classList.add("cur");
+// Amplitude-axis mode for the bar spectrum: 'rel' = dB vs the rolling peak
+// (0dB=peak, shape always visible), 'dbfs' = absolute dBFS (0dB=full-scale, same
+// ref as the heatmap), 'lin' = raw linear amplitude vs peak. Display only -
+// triggering always uses raw magnitude regardless.
+let _specScale=(window.localStorage&&localStorage.getItem("specscale"))||"rel",_specDbRef=132.4;
+const _SCALES=[["rel","dB rel"],["dbfs","dBFS"],["lin","linear"]];
+function _scaleLbl(){scaletog.textContent=(_SCALES.find(s=>s[0]==_specScale)||_SCALES[0])[1];}
+_scaleLbl(); // reflect a persisted choice on load
+scaletog.onclick=e=>{
+  e.preventDefault();
+  const i=_SCALES.findIndex(s=>s[0]==_specScale);
+  _specScale=_SCALES[(i+1)%_SCALES.length][0];
+  try{localStorage.setItem("specscale",_specScale)}catch(e){}
+  _scaleLbl();
+  drawSpectrum(); // bar plot only; heatmap keeps its own absolute dBFS scale
+};
+// (the audio level/event plot is now the shared EventPlot - see its init above)
+// Slow-rolling display reference so the dB scale is STABLE frame-to-frame -
+// you see a band actually move instead of the plot re-normalising every frame.
+// Rises fairly quick (0.3), decays slow (0.03). Shared with the heatmap so both
+// use one scale. specPAD is the left gutter for the dB axis labels.
+let _specRef=0,_specFmin=60,_specFmax=8000,_specLpf=false,_specLpfHz=4000,_specHpf=false,_specHpfHz=120,_specData=null;
+let _specPin=null; // clicked band index (dashed-line pin), or null
+const SPEC_DB=72,specPAD=34,specAX=16;   // specAX: bottom strip reserved for the freq axis
+// Heatmap colours map a FIXED dBFS window (0dB = digital full-scale, from the
+// device's X-DbRef), so a given loudness is always the same colour and history
+// never re-tints. Quiet rooms sit low (dark); events climb toward 0dB (red).
+const SPEC_DBLO=-60,SPEC_DBHI=0;
+// 2nd-order Butterworth magnitudes (match the device biquads' Q) - used to overlay
+// the filters' effect on the spectrum/heatmap when "show filtered" is on.
+function specFiltOn(){return filttog.classList.contains("cur")&&(_specLpf||_specHpf)}
+function filtGain(f){let g=1;if(_specHpf){const r=f/_specHpfHz;g*=r*r/Math.sqrt(1+r*r*r*r);}if(_specLpf){const r=f/_specLpfHz;g*=1/Math.sqrt(1+r*r*r*r);}return g}
+// Top of the plot in absolute dBFS = the rolling peak, so dBFS auto-fits the
+// vertical range (bars fill the plot like 'rel') while the labels stay true
+// dBFS. 'rel' anchors the top at 0 (i.e. "dB below peak").
+function _specTopDb(){return _specScale=="dbfs"?20*Math.log10(_specRef+1)-_specDbRef:0;}
+function specY(v,B){
+  let u;
+  if(_specScale=="lin")u=v/(_specRef||1);
+  else{const db=_specScale=="dbfs"?20*Math.log10(v+1)-_specDbRef:20*Math.log10((v+1)/(_specRef+1));
+       u=(db-_specTopDb())/SPEC_DB+1;}
+  u=Math.max(0,Math.min(1,u));return 2+(1-u)*(B-4);}
+// Live FFT spectrum of the RAW (pre-low-pass) signal. Bands are log-spaced on
+// the device, so equal-width bars give a log frequency axis; the dashed line
+// marks the low-pass cutoff and the grey steps the per-band trigger threshold.
+// The frequency labels sit in their own strip below the bars (B..H).
+async function drawSpectrum(){
+  const cv=spec;if(!cv)return;
+  let s;try{s=await(await fetch("/audio/spectrum")).json();}catch(e){return}
+  _specData=s; // stash for the hover readout (see the spec mousemove handler)
+  cv.width=cv.clientWidth||700;
+  const ctx=cv.getContext("2d"),W=cv.width,H=cv.height,B=H-specAX,m=s.m,n=m.length,t=s.t||[];
+  ctx.clearRect(0,0,W,H);
+  if(!s.on){ctx.fillStyle="#8a94a0";ctx.font="12px sans-serif";ctx.fillText("audio off",specPAD+4,20);specnote.textContent="";specpin.style.display="none";return}
+  _specFmin=s.f[0];_specFmax=s.fs/2;_specLpf=s.lpf;_specLpfHz=s.lpf_hz;_specHpf=s.hpf;_specHpfHz=s.hpf_hz;
+  if(s.dbref)_specDbRef=s.dbref;
+  const filt=specFiltOn();
+  let fm=1;for(const v of m)if(v>fm)fm=v;
+  _specRef=_specRef===0?fm:_specRef+(fm>_specRef?0.3:0.03)*(fm-_specRef);
+  const X0=specPAD,PW=W-X0;
+  const lx=f=>X0+Math.max(0,Math.min(1,Math.log(f/_specFmin)/Math.log(_specFmax/_specFmin)))*PW;
+  // gridlines + axis labels for the current amplitude mode (see _specScale).
+  ctx.font="10px sans-serif";ctx.lineWidth=1;
+  if(_specScale=="lin"){
+    for(let k=0;k<=4;k++){const u=k/4,y=2+(1-u)*(B-4);ctx.strokeStyle="#20262e";ctx.beginPath();ctx.moveTo(X0,y);ctx.lineTo(W,y);ctx.stroke();ctx.fillStyle="#6a7480";ctx.fillText(Math.round(_specRef*u),2,Math.min(B,y+3));}
+  }else{
+    const top=_specTopDb(),unit=_specScale=="dbfs"?"dBFS":"dB";
+    for(let k=0;k<=SPEC_DB;k+=24){const u=(SPEC_DB-k)/SPEC_DB,y=2+(1-u)*(B-4);ctx.strokeStyle="#20262e";ctx.beginPath();ctx.moveTo(X0,y);ctx.lineTo(W,y);ctx.stroke();ctx.fillStyle="#6a7480";ctx.fillText(Math.round(top-k)+unit,2,Math.min(B,y+3));}
+  }
+  const bw=PW/n;
+  // Bars. "show filtered" scales each band by the low-pass/high-pass response
+  // (what the stream/clips contain). The band trigger works on the RAW signal,
+  // so the threshold (t[]) is in raw units; in the filtered view we scale BOTH
+  // the bar and the threshold line by the same filter gain, which preserves the
+  // over/under relationship (filtered bar crosses filtered line exactly when raw
+  // mag crosses raw threshold), so red = "would trigger" stays correct.
+  for(let i=0;i<n;i++){const v=filt?m[i]*filtGain(s.f[i]):m[i],x=X0+i*bw,y=specY(v,B);const hot=s.strig&&t[i]!=null&&m[i]>t[i];ctx.fillStyle=hot?"#f05d5d":filt?"#3a7fd0":"#4f9dff";ctx.fillRect(x+1,y,Math.max(1,bw-2),B-y);}
+  if(s.strig&&t.length){ctx.strokeStyle="#aeb6c0";ctx.lineWidth=1;ctx.beginPath();for(let i=0;i<n;i++){const y=specY(filt?t[i]*filtGain(s.f[i]):t[i],B),x0=X0+i*bw,x1=x0+bw;if(i===0)ctx.moveTo(x0,y);else ctx.lineTo(x0,y);ctx.lineTo(x1,y);}ctx.stroke();}
+  // Pinned band: a dashed vertical indicator line + a persistent readout below
+  // (mirrors clicking the level plot). Cleared if the band count changed.
+  if(_specPin!=null&&_specPin<n){
+    const px=X0+(_specPin+0.5)*bw;
+    ctx.save();ctx.setLineDash([3,3]);ctx.strokeStyle="#ffd24d";ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,B);ctx.stroke();ctx.restore();
+    specpin.innerHTML="<b style='color:#ffd24d'>pinned</b> "+_specBandText(_specPin," · ");specpin.style.display="";
+  }else{_specPin=null;specpin.style.display="none";}
+  // cutoff markers: low-pass orange, high-pass teal (dashed).
+  ctx.setLineDash([4,3]);
+  if(s.lpf){const x=lx(s.lpf_hz);ctx.strokeStyle="#f0a85d";ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,B);ctx.stroke();}
+  if(s.hpf){const x=lx(s.hpf_hz);ctx.strokeStyle="#5fd0b0";ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,B);ctx.stroke();}
+  ctx.setLineDash([]);
+  // Frequency axis in its own strip below the bars (was overlapping them, hence
+  // hard to read). Tick marks + centred labels on a slightly inset background.
+  ctx.fillStyle="#161a1f";ctx.fillRect(0,B+1,W,specAX-1);
+  ctx.strokeStyle="#3a424d";ctx.fillStyle="#aab2bc";ctx.textAlign="center";
+  for(const f of [100,300,1000,3000,6000]){if(f<=_specFmin||f>=_specFmax)continue;const x=lx(f);ctx.beginPath();ctx.moveTo(x,B+1);ctx.lineTo(x,B+4);ctx.stroke();ctx.fillText(f>=1000?(f/1000)+"k":""+f,Math.max(10,Math.min(W-10,x)),H-4);}
+  ctx.textAlign="start";
+  if(!_hold(strig))strig.checked=s.strig;
+  if(!_hold(sfac))sfac.value=s.sfactor;
+  if(!_hold(sminmag))sminmag.value=s.sminmag;
+  {const hm=document.getElementById("habmin");if(hm&&!_hold(hm)&&s.hab_min!=null)hm.value=s.hab_min;}
+  {const bt=document.getElementById("bandtc");if(bt&&!_hold(bt)&&s.band_tc!=null)bt.value=s.band_tc;}
+  if(!_hold(shist))shist.value=s.spectro_min;
+  {const hw=document.getElementById("histwin");if(hw&&!_hold(hw))hw.value=s.hist_win;}
+  const warm=s.bandwarm_ms>0?" · warming up "+Math.ceil(s.bandwarm_ms/1000)+"s":"";
+  const view=filt?"showing FILTERED spectrum (what the stream & clips contain)":
+    "showing RAW spectrum (pre-filter)";
+  const fl=(s.hpf?"HP "+Math.round(s.hpf_hz)+"Hz":"")+(s.hpf&&s.lpf?" + ":"")+(s.lpf?"LP "+Math.round(s.lpf_hz)+"Hz":"");
+  // Legend moved out of the canvas title (which clashed with the hover tooltip)
+  // into this caption below the plot. Hover any band for its range/level/threshold.
+  specnote.innerHTML="FFT of the raw (pre-filter) mic signal · hover a band for details · "+view+" · "+(fl||"no filters")+
+    ((s.lpf||s.hpf)?" · cutoff "+(s.lpf?"<span style='color:#f0a85d'>LP</span>":"")+(s.lpf&&s.hpf?" + ":"")+(s.hpf?"<span style='color:#5fd0b0'>HP</span>":""):"")+
+    (s.strig?" · band trigger ON: <span style='color:#aeb6c0'>grey line</span> = per-band threshold"+(filt?" (filter-scaled)":"")+", bars red when over"+warm:"");
+}
+// Hover readout: the band under the cursor, its log-spaced frequency range, the
+// current level and the per-band trigger threshold (red OVER when it would fire).
+// Bars are evenly spaced by band index (bw=PW/n from X0=specPAD), so map the
+// cursor x straight to a band; f[] are band centres, edges are center*/sqrt(step).
+// Map a mouse event's x to the band index under it (or -1). Bars are evenly
+// spaced by index (bw=(W-X0)/n from X0=specPAD), shared by hover + click-pin.
+function _specBandAt(e){
+  const s=_specData;if(!s||!s.m||!s.on)return -1;
+  const r=spec.getBoundingClientRect(),W=spec.width,n=s.m.length,X0=specPAD;
+  const cx=(e.clientX-r.left)*(W/(r.width||W)); // client px -> canvas px (CSS scaling)
+  const i=Math.floor((cx-X0)/((W-X0)/n));
+  return (i<0||i>=n)?-1:i;
+}
+// One-line readout for band i (separator " · " inline, or "<br>" stacked).
+function _specBandText(i,sep){
+  const s=_specData,f=s.f,n=s.m.length,hs=Math.sqrt(n>1?f[1]/f[0]:1.1),lo=f[i]/hs,hi=f[i]*hs;
+  const fmt=hz=>hz>=1000?(hz/1000).toFixed(hz>=10000?0:1)+"k":Math.round(hz);
+  const mag=s.m[i],thr=(s.t&&s.t[i]!=null)?s.t[i]:null,over=s.strig&&thr!=null&&mag>thr;
+  let h="<b>"+fmt(lo)+"–"+fmt(hi)+" Hz</b>"+sep+"level "+Math.round(mag);
+  if(thr!=null)h+=sep+"threshold "+Math.round(thr)+(s.strig?(over?" <span style='color:#f05d5d'>· OVER</span>":""):" <span style='color:#6a7480'>(band trig off)</span>");
+  return h;
+}
+function _specHover(e){
+  const i=_specBandAt(e);
+  if(i<0){spectip.style.display="none";return}
+  spectip.innerHTML=_specBandText(i,"<br>");spectip.style.display="block";
+  spectip.style.left=Math.min(e.clientX+14,innerWidth-spectip.offsetWidth-8)+"px";
+  spectip.style.top=(e.clientY+14)+"px";
+}
+spec.addEventListener("mousemove",_specHover);
+spec.addEventListener("mouseleave",()=>{spectip.style.display="none"});
+// Click to PIN a band: a dashed vertical line + a persistent readout that survive
+// the periodic redraw (like clicking the level plot). Click the same band or
+// outside the bars to clear.
+spec.addEventListener("click",e=>{
+  const i=_specBandAt(e);
+  _specPin=(i<0||i===_specPin)?null:i;
+  drawSpectrum();
+});
+// Spectrogram heatmap: time → (oldest left), frequency ↑ (low at bottom),
+// brightness = magnitude on the same rolling reference as the bar plot.
+async function drawSpectrogram(){
+  const cv=spech;if(!cv)return;
+  let cols=0,bands=0,bms=1000,db256=0,dbRef=0,buf;
+  try{const r=await fetch("/audio/spectrogram");if(!r.ok)return;
+    cols=+r.headers.get("X-Cols")||0;bands=+r.headers.get("X-Bands")||0;bms=+r.headers.get("X-Bucket-Ms")||1000;
+    db256=(+r.headers.get("X-Db256")||0)?256:0;dbRef=+r.headers.get("X-DbRef")||0;
+    buf=new Uint16Array(await r.arrayBuffer());}catch(e){return}
+  cv.width=cv.clientWidth||700;
+  const RG=36;                                   // right gutter for the colour scale
+  const ctx=cv.getContext("2d"),W=cv.width,H=cv.height,X0=specPAD,PW=W-X0-RG;
+  ctx.clearRect(0,0,W,H);
+  if(!cols||!bands){ctx.fillStyle="#8a94a0";ctx.font="12px sans-serif";ctx.fillText("collecting spectrogram…",X0+4,20);return}
+  // Stored values are dB*256 (relative loudness). FIXED dB window -> colours
+  // never remap as the live level drifts; only the data moves.
+  const filt=specFiltOn();
+  const bf=b=>_specFmin*Math.pow(_specFmax/_specFmin,(b+0.5)/bands);
+  const g=filt?Array.from({length:bands},(_,b)=>20*Math.log10(Math.max(1e-6,filtGain(bf(b))))):null; // filter atten in dB
+  const toDb=v=>(db256?v/db256:20*Math.log10(v+1))-dbRef; // dBFS of the cell (0=full-scale)
+  const cw=PW/cols,chh=H/bands;
+  for(let c=0;c<cols;c++)for(let b=0;b<bands;b++){
+    let db=toDb(buf[c*bands+b]); if(filt)db+=g[b];
+    const u=(db-SPEC_DBLO)/(SPEC_DBHI-SPEC_DBLO);
+    ctx.fillStyle=heat(Math.max(0,Math.min(1,u)));
+    ctx.fillRect(X0+c*cw,H-(b+1)*chh,Math.ceil(cw),Math.ceil(chh)); // band 0 = lowest freq, at bottom
+  }
+  // Colour scale legend (right edge): fixed dB window.
+  const cbx=W-RG+8,cbw=9,cbtop=12,cbbot=H-4;
+  for(let y=cbtop;y<=cbbot;y++){const u=1-(y-cbtop)/(cbbot-cbtop);ctx.fillStyle=heat(u);ctx.fillRect(cbx,y,cbw,1);}
+  ctx.fillStyle="#8a94a0";ctx.font="9px sans-serif";ctx.textAlign="left";
+  for(let k=0;k<=4;k++){const db=SPEC_DBLO+(SPEC_DBHI-SPEC_DBLO)*k/4,y=cbbot-(cbbot-cbtop)*k/4;ctx.fillText(Math.round(db)+(k===4?"dB":""),cbx+cbw+2,Math.min(H-1,y+3));}
+  ctx.textAlign="start";
+  // frequency ticks (left)
+  ctx.fillStyle="#cdd3da";ctx.font="10px sans-serif";
+  for(const f of [100,1000,6000]){if(f<=_specFmin||f>=_specFmax)continue;const fr=Math.log(f/_specFmin)/Math.log(_specFmax/_specFmin);ctx.fillText(f>=1000?(f/1000)+"k":f,2,Math.max(9,H-fr*H));}
+  // span labels: oldest (left) .. now (right of the plot area)
+  const spanMin=cols*bms/60000;
+  ctx.fillStyle="#8a94a0";ctx.fillText("-"+(spanMin>=1?spanMin.toFixed(spanMin<10?1:0)+"m":Math.round(cols*bms/1000)+"s"),X0+2,11);
+  ctx.fillText("now",X0+PW-22,11);
+}
+// dark → blue → cyan → yellow → red colormap for u in [0,1].
+function heat(u){const s=[[10,12,18],[30,60,140],[40,170,180],[230,200,60],[240,70,60]];const x=u*(s.length-1),i=Math.min(s.length-2,Math.floor(x)),f=x-i,a=s[i],b=s[i+1];return"rgb("+Math.round(a[0]+f*(b[0]-a[0]))+","+Math.round(a[1]+f*(b[1]-a[1]))+","+Math.round(a[2]+f*(b[2]-a[2]))+")";}
+async function setHistWin(v){await fetch("/audio/config?hist_win="+v);} // ring re-buckets server-side; poll repaints
+async function applySpec(){
+  // Optional chaining: don't throw if habmin/bandtc are absent (partial DOM /
+  // future edits) - the sibling reads are already null-safe id-globals.
+  await fetch("/audio/config?strig="+(strig.checked?1:0)+"&sfactor="+(sfac.value||4)+"&sminmag="+(sminmag.value||0)+"&spectro_min="+(shist.value||4)+"&hab_min="+(document.getElementById("habmin")?.value||0)+"&band_tc="+(document.getElementById("bandtc")?.value||2));
+  drawSpectrum();drawSpectrogram();
+}
+// (plot rendering + interaction now live in the shared EventPlot, /ui.js)
+function fmtUp(ms){const m=Math.floor(ms/60000);return Math.floor(m/60)+"h "+(m%60)+"m"}
+async function refreshDiag(){
+  try{
+    const d=await(await fetch("/diag")).json();
+    if(d.stream_on!==undefined&&!_hold(strmen))strmen.checked=d.stream_on;
+    const q=d.rssi>-55?"excellent":d.rssi>-67?"good":d.rssi>-75?"fair":"weak";
+    diag.innerHTML=
+      "<div class='stat'><b>"+d.rssi+" dBm</b><span>WiFi ("+q+")</span></div>"+
+      "<div class='stat'><b style='color:"+(d.camera?"#5df0a0":"#f05d5d")+"'>"+(d.camera?"ok":"down")+"</b><span>camera</span></div>"+
+      (d.sd===undefined?"":"<div class='stat'><b style='color:"+(d.sd?"#5df0a0":"#f05d5d")+"'>"+(d.sd?"connected":"no card")+"</b><span>SD card"+(d.sd_drops>0?" ("+d.sd_drops+" drop"+(d.sd_drops>1?"s":"")+")":"")+"</span></div>")+
+      "<div class='stat'><b>"+d.res+"</b><span>q"+d.quality+" @ "+d.xclk+"MHz</span></div>"+
+      "<div class='stat'><b>"+(d.fps>0?d.fps.toFixed(1)+(d.net_fps>0?" / "+d.net_fps.toFixed(1):""):"idle")+"</b><span>fps cam/net</span></div>"+
+      "<div class='stat'><b>"+d.clients+"</b><span>clients</span></div>"+
+      "<div class='stat'><b>"+Math.round(d.free_heap/1024)+"KB</b><span>heap free</span></div>"+
+      "<div class='stat'><b>"+(d.free_psram/1048576).toFixed(1)+"MB</b><span>PSRAM free</span></div>"+
+      "<div class='stat'><b style='color:"+(d.temp_c>80?"#f05d5d":"#dde3ea")+"'>"+d.temp_c.toFixed(1)+"&deg;C</b><span>chip temp</span></div>"+
+      "<div class='stat'><b>"+fmtUp(d.uptime_ms)+"</b><span>uptime</span></div>";
+  }catch(e){}
+}
+// ---- Video clips: status/config, table, and in-browser AVI playback ----
+let _wasVRec=false;
+async function refreshVidStatus(){
+  try{
+    const s=await(await fetch("/video/status")).json();
+    viden.checked=s.enabled;
+    if(!_hold(vclipIn))vclipIn.value=s.clip_ms/1000;
+    if(!_hold(vpreIn))vpreIn.value=s.preroll_ms/1000;
+    if(!_hold(vfpsIn))vfpsIn.value=s.fps;
+    if(!_hold(vmaxIn))vmaxIn.value=s.vmax;
+    vonaud.checked=s.on_audio;vtrigaud.checked=s.trig_audio;
+    if(!_hold(vgapIn))vgapIn.value=Math.round(s.min_gap_ms/1000);
+    if(!_hold(vxtrigIn))vxtrigIn.value=Math.round(s.xtrig_cd_ms/1000);
+    vthen.checked=s.thermal_en;
+    if(!_hold(vthIn))vthIn.value=s.temp_max;
+    thState.textContent=s.thermal_paused?("⏸ paused — die ≥ "+s.temp_max+"°C"):(s.thermal_en?"":"off");
+    vmot.checked=s.motion;
+    if(!_hold(vmotIn))vmotIn.value=s.motion_blocks;
+    if(!_hold(vdiffIn))vdiffIn.value=s.motion_diff;
+    motlvl.textContent=s.motion?("level "+s.motion_level+" / "+s.motion_blocks
+      +(s.motion_global?" (lighting change)":"")):"";
+    vidState.textContent=s.recording?"● recording":"";
+    vrec.disabled=!s.enabled||!s.sd;
+    vidinfo.textContent=!s.sd?"needs an SD card":s.enabled
+      ?("pre-roll buffer "+s.ring_kb+"KB · "+s.ring_frames+" frames"
+        +(s.drops?" · "+s.drops+" dropped":"")):"";
+    if(_wasVRec&&!s.recording)setTimeout(refreshVid,800);
+    _wasVRec=s.recording;
+  }catch(e){}
+}
+async function setVidEn(){
+  const r=await fetch("/video/config?en="+(viden.checked?1:0));
+  if(!r.ok)alert(await r.text());
+  refreshVidStatus();refreshDiag();
+}
+async function setStrmEn(){
+  // master live-stream switch; off keeps the camera parked (audio-only, cooler)
+  await fetch("/camera/power?on="+(strmen.checked?1:0));
+  refreshDiag();
+}
+async function applyVidCfg(){
+  const r=await fetch("/video/config?clip_ms="+Math.round((vclipIn.value||10)*1000)
+    +"&preroll_ms="+Math.round((vpreIn.value||0)*1000)
+    +"&fps="+(vfpsIn.value||5)+"&vmax="+(vmaxIn.value||0));
+  if(!r.ok)alert(await r.text());
+  refreshVidStatus();
+}
+async function applyRateCfg(){
+  const r=await fetch("/video/config?min_gap="+(vgapIn.value||0)+"&xtrig_cd="+(vxtrigIn.value||0));
+  if(!r.ok)alert(await r.text());
+  refreshVidStatus();
+}
+async function setThEn(){
+  await fetch("/video/config?temp_en="+(vthen.checked?1:0));
+  refreshVidStatus();refreshDiag();
+}
+async function applyThCfg(){
+  const r=await fetch("/video/config?temp_max="+(vthIn.value||100));
+  if(!r.ok)alert(await r.text());
+  refreshVidStatus();
+}
+async function vidTrigger(){
+  vrec.disabled=true;
+  try{await fetch("/video/trigger")}catch(e){}
+  refreshVidStatus();
+}
+async function setVidMot(){
+  const r=await fetch("/video/config?motion="+(vmot.checked?1:0));
+  if(!r.ok)alert(await r.text());
+  refreshVidStatus();
+}
+async function applyVidMot(){
+  await fetch("/video/config?motion_blocks="+(vmotIn.value||12)
+    +"&motion_diff="+(vdiffIn.value||12));
+  refreshVidStatus();
+}
+function pairAudio(mt){
+  if(mt<1600000000)return null;
+  for(const a of _sdAudio)if(Math.abs(a.mtime-mt)<=8)return a.name;
+  return null;
+}
+async function refreshVid(){
+  try{
+    const r=await fetch("/video/list");
+    if(!r.ok)return;
+    const c=await r.json();
+    c.sort((a,b)=>b.name.localeCompare(a.name));
+    page("vid",c,x=>{
+      const m=x.name.match(/_(h|m|a)\.avi$/);
+      const src=m?{h:"http",m:"motion",a:"audio"}[m[1]]:null;
+      const cls=src=="http"?"http":src=="motion"?"motion":"auto";
+      const aud=pairAudio(x.mtime);
+      const en=encodeURIComponent(x.name),ena=aud?encodeURIComponent(aud):null;
+      return "<tr><td style='position:relative'>"+thumbCell(x.name)+"</td><td>"+esc(x.name)+"</td>"+
+      "<td>"+(x.mtime>1600000000?fmtTs(x.mtime*1000):"&mdash;")+"</td>"+
+      "<td>"+(src?"<span class='src "+cls+"'>"+src+"</span>":"&mdash;")+"</td>"+
+      "<td>"+(x.size/1048576).toFixed(1)+"MB</td>"+
+      "<td><button class='play vw' aria-label='play clip' onclick=\"playVid('"+en+"',"+(ena?"'"+ena+"'":"null")+",this)\">&#9654;</button></td>"+
+      "<td>"+(aud?"&#128266;":"&mdash;")+"</td>"+
+      "<td><a class='dl' href='/sd/file?name="+en+"&dl=1'>&#8595; avi</a></td>"+
+      "<td><a class='dl' href='#' onclick=\"delVid('"+en+"');return false\" style='color:#f05d5d'>&#10005;</a></td></tr>"},vidclips,vidnav,vidempty);
+  }catch(e){}
+}
+async function delVid(n){await fetch("/sd/delete?name="+n);refreshVid()}
+async function clearVid(){
+  if(!confirm("Delete ALL video clips from the SD card?"))return;
+  await fetch("/video/clear");refreshVid();
+}
+// Minimal AVI demuxer: walk the RIFF tree, collect the '00dc' MJPEG chunks
+// and the frame rate, then paint JPEGs to a canvas at the recorded pacing.
+// <video> can't play MJPEG-AVI, but the same file opens in VLC if downloaded.
+function _cc(dv,o){return String.fromCharCode(dv.getUint8(o),dv.getUint8(o+1),dv.getUint8(o+2),dv.getUint8(o+3))}
+function parseAvi(buf){
+  const dv=new DataView(buf);
+  if(dv.byteLength<224||_cc(dv,0)!="RIFF"||_cc(dv,8)!="AVI ")return null;
+  let fps=5,frames=[],p=12;
+  while(p+8<=dv.byteLength){
+    const cc=_cc(dv,p),sz=dv.getUint32(p+4,true);
+    if(cc=="LIST"){
+      const lt=_cc(dv,p+8);
+      if(lt=="movi"){
+        let q=p+12;const end=Math.min(p+8+sz,dv.byteLength);
+        while(q+8<=end){
+          const fcc=_cc(dv,q),fsz=dv.getUint32(q+4,true);
+          if(fcc=="00dc"&&fsz&&q+8+fsz<=dv.byteLength)frames.push([q+8,fsz]);
+          q+=8+fsz+(fsz&1);
+        }
+      }else if(lt=="hdrl"){
+        const us=dv.getUint32(p+20,true); // avih dwMicroSecPerFrame
+        if(us>0)fps=1e6/us;
+      }
+    }
+    p+=8+sz+(sz&1);
+  }
+  return{fps:fps,frames:frames};
+}
+let _vbuf=null,_vfrm=null,_vfps=5,_vi=0,_vtimer=null,_vaudUrl=null,_vmot=null;
+// Translucent boxes from the clip's .mot sidecar: the motion detector's
+// changed-block map nearest this frame's timestamp (maps are ~2/s).
+function drawMotMap(ctx,w,h,i){
+  if(!_vmot||!_vmot.maps||!_vmot.maps.length)return;
+  const t=i*1000/_vfps;
+  let m=null;
+  for(const e of _vmot.maps){if(e[0]<=t)m=e;else break}
+  if(!m||t-m[0]>1500)return;
+  const bw=w/_vmot.bx,bh=h/_vmot.by;
+  ctx.fillStyle="rgba(240,93,93,.22)";ctx.strokeStyle="rgba(240,93,93,.85)";ctx.lineWidth=2;
+  for(let b=0;b<_vmot.bx*_vmot.by;b++){
+    if(parseInt(m[2].substr((b>>3)*2,2),16)>>(b&7)&1){
+      const x=(b%_vmot.bx)*bw,y=((b/_vmot.bx)|0)*bh;
+      ctx.fillRect(x,y,bw,bh);ctx.strokeRect(x,y,bw,bh);
+    }
+  }
+  ctx.fillStyle="#f05d5d";ctx.font=Math.round(h/40)+"px monospace";
+  ctx.fillText("motion "+m[1],10,Math.round(h/40)+8);
+}
+async function showFrame(i){
+  if(!_vbuf)return; // closeVid() may have nulled the buffer between scheduled frames
+  _vi=i;
+  const f=_vfrm[i];
+  const bmp=await createImageBitmap(new Blob([new Uint8Array(_vbuf,f[0],f[1])],{type:"image/jpeg"}));
+  vcv.width=bmp.width;vcv.height=bmp.height;
+  const ctx=vcv.getContext("2d");
+  ctx.drawImage(bmp,0,0);
+  drawMotMap(ctx,bmp.width,bmp.height,i);
+  bmp.close();
+  vseek.value=i;
+  vfr.textContent=(i+1)+"/"+_vfrm.length;
+}
+async function playVid(name,audName,btn){
+  if(btn){btn.disabled=true;btn.innerHTML="<span class='spin'></span>"}
+  try{
+    const r=await fetch("/sd/file?name="+name);
+    if(!r.ok)throw 0;
+    // stream the body so the button can show download progress (AVIs are
+    // a few MB and take seconds from the device)
+    const total=+r.headers.get("Content-Length")||0;
+    const rd=r.body.getReader();
+    const parts=[];let got=0;
+    for(;;){
+      const{done,value}=await rd.read();
+      if(done)break;
+      parts.push(value);got+=value.length;
+      if(btn&&total)btn.textContent=Math.round(got/total*100)+"%";
+    }
+    const all=new Uint8Array(got);
+    let o=0;for(const p of parts){all.set(p,o);o+=p.length}
+    _vbuf=all.buffer;
+    const av=parseAvi(_vbuf);
+    if(!av||!av.frames.length){alert("could not parse "+name+" (empty or truncated clip)");return}
+    _vfrm=av.frames;_vfps=av.fps||5;
+    _vmot=null;
+    try{ // motion-map sidecar (only written when the detector was running)
+      const mr=await fetch("/sd/file?name="+name.replace(/\.avi$/,".mot"));
+      if(mr.ok)_vmot=await mr.json();
+    }catch(e){}
+    vseek.max=_vfrm.length-1;
+    _vaudUrl=audName?"/sd/file?name="+audName:null;
+    vaud.style.display=_vaudUrl?"inline-block":"none";
+    vplayer.style.display="block";
+    await showFrame(0);
+    vidPlay();
+  }catch(e){}
+  if(btn){btn.disabled=false;btn.innerHTML="&#9654;"}
+}
+function vidPlay(){
+  if(_vtimer||!_vfrm)return;
+  vpp.innerHTML="&#9208;";
+  _vtimer=setInterval(()=>{
+    if(_vi+1>=_vfrm.length){vidPause();return}
+    showFrame(_vi+1);
+  },1000/_vfps);
+}
+function vidPause(){
+  if(_vtimer){clearInterval(_vtimer);_vtimer=null}
+  vpp.innerHTML="&#9654;";
+}
+function vidPlayPause(){
+  if(_vtimer)vidPause();
+  else{if(_vi+1>=_vfrm.length)showFrame(0);vidPlay()}
+}
+vseek.oninput=()=>{vidPause();showFrame(+vseek.value)};
+function vidAudioToggle(){
+  if(window._clipAudio)stopClip();
+  else if(_vaudUrl)playClip(_vaudUrl,null);
+}
+function closeVid(){
+  vidPause();
+  vplayer.style.display="none";
+  _vbuf=null;_vfrm=null;_vmot=null;
+  if(window._clipAudio)stopClip();
+}
+// Poll gently: tables/diag refresh slowly (manual actions and clip-end events
+// trigger instant refreshes), and everything pauses while the tab is hidden.
+const _vis=fn=>()=>{if(!document.hidden)fn()};
+// In-flight guard: skip a periodic tick if the previous one is still pending, so
+// slow/large polls can't stack up on the device's tiny TCP window (each returns a
+// stable closure with its own busy flag, created once at setup).
+const _once=fn=>{let busy=false;return async()=>{if(busy)return;busy=true;try{await fn()}finally{busy=false}}};
+refreshStatus();refreshClips();refreshSd();refreshDiag();refreshVidStatus();refreshVid();
+setTimeout(drawSpectrum,700);setTimeout(drawSpectrogram,1000); // Event plot self-inits (/ui.js)
+setInterval(_vis(_once(refreshStatus)),2000);setInterval(_vis(_once(refreshClips)),10000);
+setInterval(_vis(_once(refreshSd)),10000);setInterval(_vis(_once(refreshDiag)),10000);
+// Spectrum is live: poll quickly while visible. The device FFT runs continuously
+// while audio is enabled (for the always-on spectral trigger), so polling only
+// affects how fresh the plot is. The 15KB spectrogram polls slower.
+setInterval(_vis(_once(drawSpectrum)),1500);
+setInterval(_vis(_once(drawSpectrogram)),2500);
+setInterval(_vis(_once(refreshVidStatus)),5000);setInterval(_vis(_once(refreshVid)),30000);
+document.addEventListener("visibilitychange",()=>{
+  if(!document.hidden){refreshStatus();refreshClips();refreshSd();refreshDiag();window.ep&&ep.reload();drawSpectrum();drawSpectrogram();refreshVidStatus();refreshVid()}
+});
+</script>
+<script src="/audio/player.js"></script>
+</body></html>
