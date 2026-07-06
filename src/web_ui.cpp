@@ -154,17 +154,23 @@ window.EventPlot=function(host,opts){
 // watchdog aborts + reconnects (with backoff) if no frame lands within stallMs -
 // so a dropped/stalled stream self-heals instead of hanging. Pauses while the tab
 // is hidden (frees the device's one viewer slot) and resumes on return.
-// iOS Safari fallback: when a browser can't read a fetch body as a stream (or the
-// reader repeatedly yields no rendered frame), we drop to a native multipart
-// <img src=/mjpeg/1>, which iOS renders fine - re-probed on start()/tab-return.
-// Returns {start,stop}. opts:{stallMs}.
+// iOS Home-Screen web-app fallback: a pinned (standalone) PWA runs a restricted
+// network stack where fetch() response STREAMING is broken - the reader never
+// yields and the live view freezes. There (and anywhere the streaming reader
+// yields no rendered frame) we POLL the single-frame snapshot endpoint instead,
+// which works everywhere (it's the same primitive the stills refresh uses).
+// Returns {start,stop}. opts:{stallMs,snapshotUrl,pollMs}.
 window.mjpegStream=function(img,url,opts){
   opts=opts||{};
   const stallMs=opts.stallMs||4000;
-  let want=false,ctrl=null,curUrl=null,busy=false,busyAt=0,last=0,retry=500,wd=null,gen=0,dry=0,paintCount=0,imgMode=false;
-  // Reading a fetch response BODY as a stream is unsupported on older iOS Safari;
-  // detect it so we can fall back to a native <img> instead of looping on a null body.
+  const snap=opts.snapshotUrl||'/jpg';   // single-frame endpoint for the poll fallback
+  const pollMs=opts.pollMs||80;          // min gap between polled frames (~12fps cap)
+  let want=false,ctrl=null,curUrl=null,busy=false,busyAt=0,last=0,retry=500,wd=null,gen=0,dry=0,paintCount=0,mode='';
   const canStream=(typeof ReadableStream!=='undefined')&&('body' in Response.prototype);
+  // iOS Home-Screen apps (navigator.standalone) and other installed PWAs
+  // (display-mode: standalone) can't stream a fetch body reliably - poll there.
+  const standalone=(window.navigator&&window.navigator.standalone===true)||
+                   !!(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches);
   // Swap the <img> only when the browser finished decoding the previous frame.
   // Setting src on every arriving frame ABORTS the in-flight decode; on a viewer
   // machine that decodes slower than frames arrive (~17-25/s) no load ever
@@ -184,13 +190,18 @@ window.mjpegStream=function(img,url,opts){
     img.src=curUrl;
   }
   function blank(){img.onload=img.onerror=null;busy=false;img.removeAttribute('src');if(curUrl){URL.revokeObjectURL(curUrl);curUrl=null}}
-  // Native <img> multipart stream: no fetch, no decode gate. It can't self-heal a
-  // server-side drop (the reason mjpegStream exists), so it's only used where the
-  // streaming reader is unavailable or keeps failing; start()/tab-return re-probe.
-  function imgFallback(my){
-    imgMode=true;busy=false;img.onload=img.onerror=null;
-    img.src=url+(url.indexOf('?')<0?'?':'&')+'r='+my;
-    last=Date.now();
+  // Poll the single-frame endpoint, paced by <img> load: the browser keeps the
+  // previous frame until the next decodes (flicker-free), and single JPEGs load
+  // where multipart streaming doesn't (iOS standalone). Self-terminates on gen bump.
+  function pollStart(my){
+    mode='poll';busy=false;last=Date.now();
+    const tick=()=>{
+      if(my!==gen||!want||document.hidden)return;
+      img.onload=()=>{if(my!==gen||!want||document.hidden)return;last=Date.now();setTimeout(tick,pollMs)};
+      img.onerror=()=>{if(my!==gen||!want||document.hidden)return;setTimeout(tick,Math.max(pollMs,500))};
+      img.src=snap+(snap.indexOf('?')<0?'?':'&')+'t='+Date.now();
+    };
+    tick();
   }
   // First \r\n\r\n (part-header terminator) in a byte buffer, or -1.
   const idx4=b=>{for(let i=0;i+3<b.length;i++)if(b[i]===13&&b[i+1]===10&&b[i+2]===13&&b[i+3]===10)return i;return -1};
@@ -198,7 +209,8 @@ window.mjpegStream=function(img,url,opts){
     const my=++gen;                       // stale-connection guard (stop/hidden bump gen)
     if(!want||document.hidden)return;
     img.onload=img.onerror=null;busy=false; // never let a stuck decode gate outlive a connection
-    if(!canStream||dry>=3){imgFallback(my);return} // streaming unusable here: native <img>
+    if(standalone||!canStream||dry>=3){pollStart(my);return} // no usable streaming: poll snapshots
+    mode='stream';
     const myCtrl=ctrl=new AbortController(); // keep our own handle: a newer conn() overwrites ctrl
     let buf=new Uint8Array(0),need=-1;const dec=new TextDecoder();const p0=paintCount;
     try{
@@ -218,12 +230,16 @@ window.mjpegStream=function(img,url,opts){
         }
       }
     }catch(e){}
-    dry=(paintCount>p0)?0:dry+1;          // a connection that never painted counts toward <img> fallback
+    dry=(paintCount>p0)?0:dry+1;          // a stream connection that never painted -> switch to polling
     if(my===gen&&want&&!document.hidden)schedule();
   }
   function schedule(){const t=retry;retry=Math.min(retry*2,5000);setTimeout(()=>{if(want&&!document.hidden)conn()},t)}
-  function watch(){if(want&&!document.hidden&&!imgMode&&ctrl&&Date.now()-last>stallMs)ctrl.abort()} // stall -> reconnect via catch
-  function start(){if(want)return;want=true;retry=500;dry=0;imgMode=false;last=Date.now();if(!wd)wd=setInterval(watch,1000);conn()}
+  function watch(){
+    if(!want||document.hidden)return;
+    if(mode==='stream'){if(ctrl&&Date.now()-last>stallMs)ctrl.abort()}   // stalled stream: reconnect via catch
+    else if(mode==='poll'){if(Date.now()-last>stallMs)conn()}            // stalled poll: restart the cycle
+  }
+  function start(){if(want)return;want=true;retry=500;dry=0;mode='';last=Date.now();if(!wd)wd=setInterval(watch,1000);conn()}
   function stop(){want=false;gen++;if(ctrl)ctrl.abort();if(wd){clearInterval(wd);wd=null}blank()}
   // On hide: drop the connection (frees the device's viewer slot) but KEEP the
   // last frame on screen. Browsers freeze/discard hidden tabs, and if our JS
@@ -232,7 +248,7 @@ window.mjpegStream=function(img,url,opts){
   // stream that then refreshes on reconnect.
   document.addEventListener('visibilitychange',()=>{
     if(document.hidden){gen++;if(ctrl)ctrl.abort()}
-    else if(want){retry=500;dry=0;imgMode=false;last=Date.now();conn()}
+    else if(want){retry=500;dry=0;mode='';last=Date.now();conn()}
   });
   return {start,stop};
 };
