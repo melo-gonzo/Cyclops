@@ -59,10 +59,16 @@ def generate():
     # token below (expanded to the same compile-time concatenation as the old
     # hand-written literals, so the stored bytes are unchanged).
     c = [banner, '#include "web_assets.gen.h"\n', '#include "branding.h"\n', "\n"]
-    # %DEVICE_NAME% -> break the raw string, concatenate the DEVICE_NAME macro,
-    # reopen it: R"WEBRAW(...)WEBRAW" DEVICE_NAME R"WEBRAW(...)WEBRAW"
+    # Template tokens expand back into the exact compile-time construction the old
+    # hand-written literals used, so the stored bytes are unchanged:
+    #   %DEVICE_NAME%  -> ...)WEBRAW" DEVICE_NAME R"WEBRAW(...   (macro splice)
+    #   %IF_XIAO% / %ENDIF%  -> break the raw string around an
+    #      #ifdef CAMERA_MODEL_XIAO_ESP32S3 ... #endif so board-conditional page
+    #      sections are compiled only into the XIAO build (as the docs page did).
     token_expansions = {
         "%DEVICE_NAME%": ')%s" DEVICE_NAME R"%s(' % (DELIM, DELIM),
+        "%IF_XIAO%": ')%s"\n#ifdef CAMERA_MODEL_XIAO_ESP32S3\nR"%s(' % (DELIM, DELIM),
+        "%ENDIF%": ')%s"\n#endif\nR"%s(' % (DELIM, DELIM),
     }
     for fn in files:
         with open(os.path.join(WEB, fn), "rb") as fp:

@@ -16,6 +16,7 @@
 */
 
 #include "OV2640.h"
+#include "web_assets.gen.h"
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -783,185 +784,12 @@ void handleStreamPower() {
 // Static quick-reference for the tunable settings. XIAO-only subsystems (audio,
 // spectral trigger, video) are #ifdef'd out of the page on the esp32cam build so
 // the docs always match the firmware actually running.
-static const char DOCS_PAGE[] PROGMEM = R"DOC(<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>)DOC" DEVICE_NAME R"DOC( - Docs</title>
-<style>
-body{font-family:-apple-system,system-ui,sans-serif;background:#14171c;color:#dde3ea;margin:0;padding:16px;max-width:760px;margin:auto}
-a{color:#6fb3ff}
-.card{background:#1d2229;border-radius:10px;padding:14px 16px;margin-bottom:14px}
-h3{font-size:.85em;color:#8a94a0;font-weight:500;margin:0 0 10px;text-transform:uppercase;letter-spacing:.05em}
-#nav{display:flex;gap:6px;align-items:center;margin:4px 0 12px;flex-wrap:wrap}
-#nav b{margin-right:10px}
-#nav a,#nav span{color:#8a94a0;text-decoration:none;padding:6px 12px;border-radius:8px;font-size:.9em}
-#nav .cur{background:#1d2229;color:#dde3ea}
-#tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}
-#tabs button{background:#1d2229;color:#8a94a0;border:0;padding:7px 13px;border-radius:8px;font-size:.9em;cursor:pointer}
-#tabs button.cur{background:#2b6cb0;color:#fff}
-section{display:none}
-section.on{display:block}
-dl{margin:0;display:grid;grid-template-columns:160px 1fr;gap:6px 16px}
-dt{color:#dde3ea;font-weight:600;font-size:.9em}
-dd{margin:0;color:#aab4c0;font-size:.9em;line-height:1.45}
-.r{color:#6f7a86;font-size:.82em;white-space:nowrap}
-.lead{color:#8a94a0;font-size:.9em;margin:0 0 4px}
-.p{color:#aab4c0;font-size:.9em;line-height:1.5;margin:0 0 10px}
-.p+.p{margin-top:-2px}
-code{background:#14171c;border-radius:4px;padding:1px 5px;font-size:.85em;color:#cbd5e1}
-.card ul{margin:6px 0 0;padding-left:18px;color:#aab4c0;font-size:.9em;line-height:1.5}
-.card li{margin-bottom:4px}
-@media(max-width:560px){dl{grid-template-columns:1fr}dt{margin-top:8px}}
-</style></head><body>
-<div id="nav"></div>
-<div id="tabs">
-  <button data-s="ov" class="cur">Overview</button>
-  <button data-s="arch">Architecture</button>
-)DOC"
-#ifdef CAMERA_MODEL_XIAO_ESP32S3
-R"DOC(  <button data-s="trig">Triggers</button>
-)DOC"
-#endif
-R"DOC(  <button data-s="set">Settings</button>
-  <button data-s="net">Setup &amp; network</button>
-</div>
-
-<section id="ov">
-<div class="card"><h3>What it is</h3>
-<p class="p">)DOC" DEVICE_NAME R"DOC( is a trigger-based audio + video capture node built on the Seeed XIAO ESP32-S3 Sense (the firmware also builds for the ESP32-CAM, video only). It listens and watches; when sound or motion crosses a threshold it saves a short clip — with the seconds <em>before</em> the event included — to the SD card.</p>
-<p class="p">Everything is served from an on-device web dashboard over your LAN or the device's own WiFi hotspot. There is no cloud: capture, storage, and playback are entirely local.</p>
-</div>
-<div class="card"><h3>The pages</h3><dl>
-<dt>Clips</dt><dd>Saved audio/video clips (RAM + SD), the level plot, and the live spectrum.</dd>
-<dt>Live</dt><dd>Live MJPEG video and the live audio stream.</dd>
-<dt>Camera</dt><dd>Sensor controls — resolution, exposure, gain, white balance.</dd>
-<dt>Record</dt><dd>Continuous (untriggered) recording to SD, plus the trigger settings.</dd>
-<dt>Graphs</dt><dd>System-metrics history: RSSI, FPS, heap/PSRAM, temperature, triggers.</dd>
-<dt>WiFi</dt><dd>Network join, hostname, accounts, and over-the-air firmware updates.</dd>
-</dl></div>
-</section>
-
-<section id="arch">
-<div class="card"><h3>Capture pipeline</h3>
-<p class="p"><strong>Audio:</strong> PDM mic → I2S DMA → DSP (high/low-pass filters, RMS level, FFT) → trigger decision → PSRAM pre-roll ring → SD writer → <code>clip_NNNNN_x.wav</code>.</p>
-<p class="p"><strong>Video:</strong> camera → JPEG frame ring (PSRAM) → motion frame-diff → AVI writer → <code>vclip_NNNNN_x.avi</code>. An audio trigger can also record a paired video clip and vice-versa.</p>
-</div>
-<div class="card"><h3>Concurrency &amp; storage</h3>
-<ul>
-<li>Independent FreeRTOS tasks (audio capture, camera, MJPEG stream, SD writer, web server) pinned across both cores.</li>
-<li>All SD/SPI access is serialized through one mutex. The clip list and cap-eviction hot paths read an in-RAM index of <code>/clips</code> instead of scanning the card, so a slow card never stalls the UI.</li>
-<li>Settings live in NVS and survive reboots. The level / heatmap / metrics history is mirrored to SD, so the plots survive power loss too.</li>
-</ul>
-</div>
-<div class="card"><h3>Clip storage &amp; retention</h3>
-<ul>
-<li>Clip numbers run <code>00000</code>–<code>09999</code> and wrap, keeping names tidy. Each kind (audio, video) keeps the newest N; the oldest is evicted first (wrap-aware).</li>
-<li>Per-clip over-threshold data (level / threshold / Hz) is persisted in <code>clipmeta.csv</code> so the Clips table's "Over thr" column survives reboots.</li>
-<li>Continuous segments (Record page) roll off by a size/time retention cap, independent of triggers.</li>
-</ul>
-</div>
-<div class="card"><h3>Code shape</h3>
-<p class="p">"Functional core / imperative shell": the decision math — filters, thresholds, FFT, retention, parsing — lives in pure C++ headers unit-tested on the host (<code>pio test -e native</code>). The <code>.cpp</code> shells own the hardware and timing. XIAO-only subsystems are compiled out of the ESP32-CAM build, so this page always matches the running firmware.</p>
-</div>
-</section>
-)DOC"
-#ifdef CAMERA_MODEL_XIAO_ESP32S3
-R"DOC(<section id="trig">
-<div class="card"><h3>Level trigger — adaptive</h3>
-<p class="p">The device continuously learns the room's noise floor with a slow-rise / fast-fall estimator: it follows a sudden quieting quickly but creeping ambient drift slowly. The trigger fires when the level exceeds <strong>floor × sensitivity</strong>, clamped up to the "min threshold" so a silent room can't become a hair-trigger.</p>
-<p class="p">A <em>sustained</em> loud sound is gradually absorbed into the floor (habituation) so it stops re-firing, while brief transients keep triggering. A manual threshold (&gt; 0) overrides the adaptive value entirely.</p>
-</div>
-<div class="card"><h3>Level trigger — statistical</h3>
-<p class="p">An alternative model that tracks the running <strong>mean and standard deviation (σ)</strong> of the level over a window (in minutes) and fires on samples <strong>k·σ above the mean</strong>. A busy, variable room raises its own bar automatically; a quiet room stays sensitive. One knob: <code>k</code> (lower = more sensitive). <code>k</code> is the σ multiplier — distinct from the measured σ shown live.</p>
-</div>
-<div class="card"><h3>Spectral (band) trigger</h3>
-<p class="p">Runs an FFT and learns a per-band floor with the same adaptive model. It fires when any single frequency band crosses its own threshold — catching narrow-band sounds (beeps, alarms, whines) that broadband level misses — and names the hottest band in the log and tooltip.</p>
-</div>
-<div class="card"><h3>Motion &amp; pre-roll</h3>
-<p class="p"><strong>Motion:</strong> an on-device block frame-diff; a video clip records when enough of the frame changes. Off by default because it costs CPU.</p>
-<p class="p"><strong>Pre-roll:</strong> a rolling buffer continuously holds the last few seconds, so every clip starts <em>before</em> the trigger. <strong>Gain:</strong> thresholds scale with mic gain, so changing gain doesn't change how sensitive the trigger feels.</p>
-</div>
-</section>
-)DOC"
-#endif
-R"DOC(<section id="set">
-<p class="lead">Tunable settings. Ranges in grey.</p>
-)DOC"
-#ifdef CAMERA_MODEL_XIAO_ESP32S3
-R"DOC(<div class="card"><h3>Audio capture</h3><dl>
-<dt>Clip length</dt><dd>Total length of each saved WAV, pre-roll included. <span class="r">0.5–10 s</span></dd>
-<dt>Pre-roll</dt><dd>Seconds kept from <em>before</em> the trigger fired. <span class="r">&lt; clip length</span></dd>
-<dt>Mic gain</dt><dd>Digital gain on the PDM mic. Trigger thresholds scale with it, so loudness sensitivity stays put. <span class="r">1–64×</span></dd>
-<dt>Auto-trigger</dt><dd>Start a clip automatically when the level crosses the threshold.</dd>
-<dt>Sensitivity</dt><dd>Adaptive threshold = learned noise-floor × this. <strong>Lower = more sensitive.</strong> <span class="r">1.2–20</span></dd>
-<dt>Threshold algorithm</dt><dd>Floor × factor, or statistical (mean + k·σ). <span class="r">see Triggers</span></dd>
-<dt>k (σ multiplier)</dt><dd>Statistical mode: fire k standard deviations above the mean. <strong>Lower = more sensitive.</strong></dd>
-<dt>Averaging window</dt><dd>Statistical mode: minutes of level history the mean/σ are computed over. <span class="r">0.25–240 min</span></dd>
-<dt>Min threshold</dt><dd>Absolute floor for the adaptive threshold; stops a dead-quiet room becoming a hair-trigger. <span class="r">0–32767</span></dd>
-<dt>Manual threshold</dt><dd>Fixed trigger level; overrides the adaptive value when set. <span class="r">0 = adaptive</span></dd>
-<dt>Low-pass filter</dt><dd>Rolls off high-frequency hiss above the cutoff. Affects the live stream, saved clips, and the level meter. <span class="r">200–7800 Hz</span></dd>
-<dt>High-pass filter</dt><dd>Rolls off low-frequency rumble / HVAC below the cutoff. <span class="r">30–2000 Hz</span></dd>
-<dt>Level retention</dt><dd>How far back the amplitude/threshold plot is kept. Longer = coarser buckets, same memory. <span class="r">6–72 h</span></dd>
-</dl></div>
-<div class="card"><h3>Spectral trigger &amp; heatmap</h3><dl>
-<dt>Band trigger</dt><dd>Fire when any single frequency band crosses its own adaptive threshold (catches narrow-band sounds the level meter misses).</dd>
-<dt>Band sensitivity</dt><dd>Per-band threshold = band floor × this. <strong>Higher = LESS sensitive.</strong> <span class="r">1.5–100</span></dd>
-<dt>Min band magnitude</dt><dd>Advanced floor: bands quieter than this never trigger, regardless of sensitivity.</dd>
-<dt>Heatmap window</dt><dd>Time span of the frequency heatmap. Longer = coarser columns, same memory. Scale is dBFS (0 = full-scale). <span class="r">1–120 min</span></dd>
-</dl></div>
-<div class="card"><h3>Video clips</h3><dl>
-<dt>Enable</dt><dd>Master on/off for clip recording; frees the PSRAM frame ring when off.</dd>
-<dt>FPS</dt><dd>Frames per second captured into clips. <span class="r">2–10</span></dd>
-<dt>Clip length / Pre-roll</dt><dd>Same meaning as audio, applied to the MJPEG-AVI clip.</dd>
-<dt>Record on audio</dt><dd>An audio trigger also records a paired video clip (and vice-versa).</dd>
-<dt>Motion detect</dt><dd>On-device frame-diff trigger. Off by default — it costs CPU.</dd>
-<dt>Motion sensitivity</dt><dd>How much frame change counts as motion; higher diff / more blocks = less twitchy (ignores AEC flicker).</dd>
-</dl></div>
-)DOC"
-#endif
-R"DOC(<div class="card"><h3>Camera</h3><dl>
-<dt>Resolution</dt><dd>Sensor frame size. Larger = sharper but slower and heavier on PSRAM/SD.</dd>
-<dt>Quality / exposure / gain</dt><dd>Standard OV-sensor controls (JPEG quality, auto/manual exposure, AGC, white balance). Tune live on the Camera page.</dd>
-<dt>Live stream</dt><dd>Master on/off for the MJPEG stream; capture keeps running for triggers when off.</dd>
-</dl></div>
-<div class="card"><h3>Diagnostics (Graphs)</h3><dl>
-<dt>Metrics retention</dt><dd>How far back the system-metrics graphs are kept. Longer = coarser buckets, same memory. <span class="r">2–24 h</span></dd>
-<dt>Series</dt><dd>RSSI, FPS, heap/PSRAM, temperature, clients, trigger/stall/drop counts. Each is normalized to its own range; click the legend to toggle, hover for real values.</dd>
-</dl></div>
-<div class="card"><h3>Continuous record</h3><dl>
-<dt>Continuous record</dt><dd>Back-to-back segments to SD on the Record page, independent of triggers; old segments roll off by a retention cap.</dd>
-</dl></div>
-<p class="lead">Settings persist across reboots (NVS). History plots also survive power loss via the SD card.</p>
-</section>
-
-<section id="net">
-<div class="card"><h3>First boot</h3>
-<p class="p">Out of the box the device raises a WiFi hotspot. Connect to it, open the dashboard, and on the <b>WiFi</b> page enter your home network. Set a hostname — the device is then reachable at <code>&lt;host&gt;.local</code> via mDNS — and optionally a static-IP last octet, which lets a whole fleet run one identical binary while staying individually addressable. Reboot to apply network changes; other settings apply live.</p>
-</div>
-<div class="card"><h3>Accounts</h3><dl>
-<dt>Admin</dt><dd>Full control: every setting, clip deletion, firmware updates.</dd>
-<dt>Viewer (optional)</dt><dd>Read-only: can watch, listen, and download clips, but cannot change any setting. Enable it on the WiFi page.</dd>
-</dl></div>
-<div class="card"><h3>Firmware (OTA)</h3>
-<p class="p">Update over the air from the <b>Firmware</b> card on the WiFi page: upload a <code>firmware.bin</code> and the device verifies it, writes the spare OTA partition, and reboots into it. The version line shows the running build. The dual-OTA layout means a bad image can roll back to the previous one.</p>
-</div>
-</section>
-
-<script>
-(function(){
-var tb=document.querySelectorAll('#tabs button'),sc=document.querySelectorAll('section');
-function show(id){var i;for(i=0;i<sc.length;i++)sc[i].classList.toggle('on',sc[i].id===id);
-for(i=0;i<tb.length;i++)tb[i].classList.toggle('cur',tb[i].dataset.s===id);
-if(history.replaceState)history.replaceState(null,'','#'+id);else location.hash=id;}
-for(var k=0;k<tb.length;k++)tb[k].addEventListener('click',function(){show(this.dataset.s);});
-var h=location.hash.slice(1);show(document.getElementById(h)&&document.getElementById(h).tagName=='SECTION'?h:'ov');
-})();
-</script>
-<script src="/ui.js"></script><script>buildNav('/docs')</script>
-</body></html>)DOC";
+// WEB_DOCS_HTML now lives in web/docs.html (compiled in as WEB_DOCS_HTML via
+// web/ codegen; %IF_XIAO%/%ENDIF% keep the audio/spectral sections XIAO-only)
 
 void handleDocs() {
   if (!webAuthOk()) return;
-  server.send_P(200, "text/html", DOCS_PAGE);
+  server.send_P(200, "text/html", WEB_DOCS_HTML);
 }
 
 #if !HAS_AUDIO
