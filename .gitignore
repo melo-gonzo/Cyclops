@@ -9,5 +9,9 @@ src/wifikeys.h
 # Optional per-build name overrides (defaults live in branding.h).
 src/branding_local.h
 
+# Generated from web/ by tools/gen_web_assets.py on every build (pre-script).
+src/web_assets.gen.h
+src/web_assets.gen.cpp
+
 # macOS
 .DS_Store
