@@ -13,6 +13,7 @@
 #include "audio_capture.h"
 
 bool sdIsAvailable() { return false; }      // no SD card wired on this board
+void sdRequestBootSkip() {}                 // no SD phase to skip
 SemaphoreHandle_t sdGetMutex() { return NULL; }
 bool sdLowSpace() { return false; }
 void sdNotifyWriteFailed() {}

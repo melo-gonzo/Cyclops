@@ -1711,6 +1711,11 @@ static QueueHandle_t audioStreamClients = NULL;
 static TaskHandle_t tAudioStream = NULL;
 
 static volatile bool sdAvailable = false;
+// Set via sdRequestBootSkip() when the previous boot hung inside init: a wedged
+// card can block an SPI transaction forever (no timeout in the SD layer), so
+// this boot runs without SD and the auto-remount tick stays off - only an
+// explicit /sd/remount (or a reboot) retries the card.
+static volatile bool sdBootSkip = false;
 static volatile bool saveToSd = true;
 static volatile uint32_t sdMaxClips = 100; // delete-oldest cap; 0 = unlimited
 static uint32_t sdFileIndex = 0;       // next clip_NNNNN.wav number
@@ -1723,6 +1728,8 @@ static SemaphoreHandle_t sdMutex = NULL;
 // in the writer task probes the card and silently re-mounts it after a dropout
 // so no physical re-seat is needed.
 #define SD_MOUNT_ATTEMPTS 4      // cold-boot mount tries before giving up
+#define SD_SCAN_MAX_ENTRIES 20000 // boot-scan bound: a corrupt FAT directory
+                                  // chain can loop, feeding entries forever
 #define SD_PROBE_MS       5000   // liveness-probe cadence while mounted
 #define SD_RECOVER_MIN_MS 2000   // first auto-remount delay after a dropout
 #define SD_RECOVER_MAX_MS 30000  // backoff ceiling between remount attempts
@@ -1775,6 +1782,8 @@ static void sdMarkDown() {
 }
 static QueueHandle_t sdWriteQueue = NULL;
 static TaskHandle_t tSdWriter = NULL;
+
+void sdRequestBootSkip() { sdBootSkip = true; }
 
 // ---- Settings persistence (NVS) ----
 // Loaded once at init; saved on every /audio/config change. NVS skips
@@ -2103,7 +2112,9 @@ static bool sdInit(int attempts = SD_MOUNT_ATTEMPTS) {
   File dir = SD.open(SD_CLIP_DIR);
   if (dir) {
     File entry;
-    while ((entry = dir.openNextFile())) {
+    uint32_t scanned = 0;
+    while (scanned < SD_SCAN_MAX_ENTRIES && (entry = dir.openNextFile())) {
+      scanned++;
       unsigned idx = 0;
       const char *base = strrchr(entry.name(), '/');
       base = base ? base + 1 : entry.name();
@@ -2115,6 +2126,9 @@ static bool sdInit(int attempts = SD_MOUNT_ATTEMPTS) {
       }
       entry.close();
     }
+    if (scanned >= SD_SCAN_MAX_ENTRIES)
+      dlog(DLOG_ERR, "SD boot scan stopped at %u entries - FAT directory chain "
+           "suspect, reformat advised", (unsigned)SD_SCAN_MAX_ENTRIES);
     dir.close();
   }
   // Resume numbering just past the newest existing clip - wrap-aware (the number
@@ -2140,6 +2154,10 @@ static void contAudSeed(); // defined with the continuous-recording task below
  * and resume on their own once this re-mounts. Must run holding no locks.
  */
 static void sdHealthTick() {
+  // Boot-skip mode: no auto-remount. A card that wedged a previous boot can
+  // hang SD.begin() on the bus, which would kill this task while it holds
+  // sdMutex; retrying is reserved for an explicit /sd/remount.
+  if (sdBootSkip) return;
   uint32_t now = millis();
   sdhealth::State st = sdHLoad();
   sdhealth::Action act = sdhealth::nextAction(st, now);
@@ -3592,11 +3610,20 @@ bool audioInit() {
   clipMetaInit();  // RAM over-threshold ring (loaded from SD by sdInit's scan)
   sdMutex = xSemaphoreCreateMutex();
   sdWriteQueue = xQueueCreate(MAX_CLIP_SLOTS, sizeof(int));
-  sdAvailable = sdInit();
-  if (sdAvailable)
-    dlog(DLOG_INFO, "SD mounted at boot (%llu/%lluMB)", sdUsedMbCache, sdTotalMbCache);
-  else
-    dlog(DLOG_WARN, "SD NOT mounted at boot - clips PSRAM-only, auto-retrying");
+  if (sdBootSkip) {
+    // Previous boot hung inside init: the card is the suspect and a mount can
+    // block the SPI bus forever, so don't touch it. The device stays reachable;
+    // /sd/remount (or a plain reboot) retries once the card is fixed/replaced.
+    sdAvailable = false;
+    dlog(DLOG_ERR, "SD skipped: last boot hung in init (card suspect) - "
+                   "fix/replace card, then /sd/remount or reboot");
+  } else {
+    sdAvailable = sdInit();
+    if (sdAvailable)
+      dlog(DLOG_INFO, "SD mounted at boot (%llu/%lluMB)", sdUsedMbCache, sdTotalMbCache);
+    else
+      dlog(DLOG_WARN, "SD NOT mounted at boot - clips PSRAM-only, auto-retrying");
+  }
 
   audioStreamClients = xQueueCreate(MAX_AUDIO_STREAM_CLIENTS, sizeof(WiFiClient *));
 
@@ -4201,6 +4228,10 @@ void audioSdWipeAll() {
 }
 
 static void handleSdRemount() {
+  // A deliberate remount lifts boot-skip mode: the user is telling us the card
+  // has been dealt with, so mounting and the health tick's auto-retry are fair
+  // game again.
+  sdBootSkip = false;
   // One attempt only: the full SD_MOUNT_ATTEMPTS retry holds sdMutex (and this
   // single-threaded server task) for seconds on a flaky card. The health tick's
   // backoff keeps retrying afterward if this one misses, same as sdHealthTick.

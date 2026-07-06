@@ -26,6 +26,7 @@
 #include <esp_sleep.h>
 #include <esp_wifi.h>
 #include <esp_pm.h>
+#include <esp_timer.h> // boot-guard sentinel (runs outside the blocked task)
 #include "soc/rtc_cntl_reg.h"
 #include "soc/soc.h"
 #include "lwip/sockets.h" // raw send()/select() for the bounded MJPEG frame write
@@ -1150,6 +1151,50 @@ void printSystemInfo() {
 #define RESET_HOLD_MS  5000
 #endif
 
+// ---- Boot guard: a wedged SD card must not brick the device ----
+// The SD layer has no SPI timeout, so a dying card can hang init forever with
+// WiFi already up: the board answers ping but no server ever listens (a
+// "ping-alive brick" - happened to .65 on 2026-07-05, and only pulling the card
+// recovered it). Two-part breaker, spanning the post-WiFi init phase:
+//   1. An NVS mark is set entering the phase and cleared on completion. Found
+//      already set at boot => the previous boot died inside the phase, so this
+//      boot skips SD entirely (sdRequestBootSkip) and stays reachable.
+//   2. A one-shot sentinel timer (its callback runs in the esp_timer task, so a
+//      blocked init can't stop it) reboots a hung init after BOOT_SENTINEL_S,
+//      which is what makes the skip in (1) engage without human help.
+// A power cut inside the window false-positives into one SD-less boot; the next
+// reboot (or /sd/remount) mounts normally again. 120s is comfortably above the
+// worst legitimate phase: 4 mount retries plus a full-card clip scan.
+#define BOOT_SENTINEL_S 120
+static esp_timer_handle_t bootSentinel = NULL;
+static void bootSentinelFire(void *) {
+  dlog(DLOG_ERR, "init hung >%us - sentinel reboot, SD will be skipped",
+       (unsigned)BOOT_SENTINEL_S);
+  esp_restart();
+}
+static bool bootGuardBegin() { // -> true if the previous boot hung in the phase
+  Preferences p;
+  p.begin("boot", false);
+  bool hung = p.getBool("initing", false);
+  p.putBool("initing", true);
+  p.end();
+  esp_timer_create_args_t args = {};
+  args.callback = bootSentinelFire;
+  args.name = "bootguard";
+  esp_timer_create(&args, &bootSentinel);
+  esp_timer_start_once(bootSentinel, (uint64_t)BOOT_SENTINEL_S * 1000000ULL);
+  return hung;
+}
+static void bootGuardEnd() {
+  esp_timer_stop(bootSentinel);
+  esp_timer_delete(bootSentinel);
+  bootSentinel = NULL;
+  Preferences p;
+  p.begin("boot", false);
+  p.putBool("initing", false);
+  p.end();
+}
+
 void setup() {
 #ifdef CAMERA_MODEL_AI_THINKER
   // Disable brownout detector: ESP32-CAM's AMS1117 regulator dips on WiFi TX
@@ -1262,6 +1307,16 @@ void setup() {
   // WiFi/mDNS are up so the hostname resolves for espota. Works on the AP too.
   otaInit();
 
+  // Everything below can touch the SD card (audio boot scan, video clip scan,
+  // continuous-recording seed) and the SD layer can hang forever on a dying
+  // card - guard the whole phase (see the boot-guard block above setup()).
+  if (bootGuardBegin()) {
+    dlog(DLOG_ERR, "previous boot hung in init - booting degraded (no SD)");
+#if HAS_SD
+    sdRequestBootSkip(); // declared in audio_capture.h (XIAO-only include above)
+#endif
+  }
+
 #if HAS_AUDIO
   if (audioInit()) {
     audioStart();
@@ -1287,6 +1342,8 @@ void setup() {
 #endif
 
   xTaskCreatePinnedToCore(mjpegCB, "mjpeg_server", 12288, NULL, 5, &tMjpeg, APP_CPU);
+
+  bootGuardEnd(); // init finished: clear the hang mark, stop the sentinel
 
   startTimeAGAIN = millis();
 

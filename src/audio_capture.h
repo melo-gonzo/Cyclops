@@ -39,6 +39,12 @@ void audioRegisterEndpoints(WebServer &server);
 bool sdIsAvailable();
 SemaphoreHandle_t sdGetMutex();
 
+// Degraded-boot request from main.cpp's boot guard: the previous boot hung in
+// init (a wedged card can block SPI forever - no timeout in the SD layer), so
+// skip SD mounting this boot and suspend the auto-remount tick. The device
+// stays reachable; /sd/remount clears it for a deliberate retry.
+void sdRequestBootSkip();
+
 // Report an SD write/open failure from another module (e.g. the video recorder):
 // marks the card down and schedules an immediate auto-remount, so a drop is
 // recovered without waiting for the next liveness probe. Call without the mutex.

@@ -25,6 +25,7 @@
 #include "ratelimit.h" // pure cross-trigger cooldown (unit-tested in test/test_ratelimit)
 #include "thermal.h"   // pure thermal-governor hysteresis (unit-tested in test/test_thermal)
 #include "metrics_svc.h" // diagnostics time-series feed (/graphs)
+#include "diag_log.h"    // dlog: RTC-backed ring, survives the reboot it predicts
 #include "history.h"     // pure plot-history decimation (unit-tested in test/test_history)
 #include <Preferences.h>
 #include <FS.h>
@@ -1599,7 +1600,11 @@ bool videoInit(uint16_t w, uint16_t h) {
     File dir = SD.open(VID_CLIP_DIR);
     if (dir) {
       File entry;
-      while ((entry = dir.openNextFile())) {
+      // Bounded like the audio boot scan: a corrupt FAT directory chain can
+      // loop, feeding entries forever and hanging boot.
+      uint32_t scanned = 0;
+      while (scanned < 20000 && (entry = dir.openNextFile())) {
+        scanned++;
         unsigned idx = 0;
         const char *base = strrchr(entry.name(), '/');
         base = base ? base + 1 : entry.name();
@@ -1613,6 +1618,9 @@ bool videoInit(uint16_t w, uint16_t h) {
         }
         entry.close();
       }
+      if (scanned >= 20000)
+        dlog(DLOG_ERR, "video boot scan stopped at %u entries - FAT directory "
+             "chain suspect, reformat advised", (unsigned)scanned);
       dir.close();
     }
     xSemaphoreGive(sdGetMutex());
