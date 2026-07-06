@@ -154,55 +154,76 @@ window.EventPlot=function(host,opts){
 // watchdog aborts + reconnects (with backoff) if no frame lands within stallMs -
 // so a dropped/stalled stream self-heals instead of hanging. Pauses while the tab
 // is hidden (frees the device's one viewer slot) and resumes on return.
+// iOS Safari fallback: when a browser can't read a fetch body as a stream (or the
+// reader repeatedly yields no rendered frame), we drop to a native multipart
+// <img src=/mjpeg/1>, which iOS renders fine - re-probed on start()/tab-return.
 // Returns {start,stop}. opts:{stallMs}.
 window.mjpegStream=function(img,url,opts){
   opts=opts||{};
   const stallMs=opts.stallMs||4000;
-  let want=false,ctrl=null,curUrl=null,busy=false,last=0,retry=500,wd=null,gen=0;
+  let want=false,ctrl=null,curUrl=null,busy=false,busyAt=0,last=0,retry=500,wd=null,gen=0,dry=0,paintCount=0,imgMode=false;
+  // Reading a fetch response BODY as a stream is unsupported on older iOS Safari;
+  // detect it so we can fall back to a native <img> instead of looping on a null body.
+  const canStream=(typeof ReadableStream!=='undefined')&&('body' in Response.prototype);
   // Swap the <img> only when the browser finished decoding the previous frame.
   // Setting src on every arriving frame ABORTS the in-flight decode; on a viewer
   // machine that decodes slower than frames arrive (~17-25/s) no load ever
   // completes and the element stays black forever. A live view drops frames.
   function show(bytes){
-    if(busy)return;                       // decoder still busy: drop this frame
-    busy=true;
+    // Backpressure: drop while the previous frame is still decoding - BUT never let
+    // a lost onload (a WebKit quirk under memory pressure) wedge the gate shut
+    // forever; after 2s assume that decode is lost and advance to a fresh frame.
+    if(busy&&Date.now()-busyAt<2000)return;
+    busy=true;busyAt=Date.now();
     const prev=curUrl;
     curUrl=URL.createObjectURL(new Blob([bytes],{type:'image/jpeg'}));
-    const done=()=>{img.onload=img.onerror=null;busy=false;if(prev)URL.revokeObjectURL(prev)};
+    // last is stamped on PAINT (here), NOT on parse below, so the stall watchdog
+    // reconnects a stream that is arriving-but-never-rendering (the silent iOS black).
+    const done=()=>{img.onload=img.onerror=null;busy=false;paintCount++;last=Date.now();if(prev)URL.revokeObjectURL(prev)};
     img.onload=done;img.onerror=done;
     img.src=curUrl;
   }
   function blank(){img.onload=img.onerror=null;busy=false;img.removeAttribute('src');if(curUrl){URL.revokeObjectURL(curUrl);curUrl=null}}
+  // Native <img> multipart stream: no fetch, no decode gate. It can't self-heal a
+  // server-side drop (the reason mjpegStream exists), so it's only used where the
+  // streaming reader is unavailable or keeps failing; start()/tab-return re-probe.
+  function imgFallback(my){
+    imgMode=true;busy=false;img.onload=img.onerror=null;
+    img.src=url+(url.indexOf('?')<0?'?':'&')+'r='+my;
+    last=Date.now();
+  }
   // First \r\n\r\n (part-header terminator) in a byte buffer, or -1.
   const idx4=b=>{for(let i=0;i+3<b.length;i++)if(b[i]===13&&b[i+1]===10&&b[i+2]===13&&b[i+3]===10)return i;return -1};
   async function conn(){
     const my=++gen;                       // stale-connection guard (stop/hidden bump gen)
     if(!want||document.hidden)return;
     img.onload=img.onerror=null;busy=false; // never let a stuck decode gate outlive a connection
-    ctrl=new AbortController();
-    let buf=new Uint8Array(0),need=-1;const dec=new TextDecoder();
+    if(!canStream||dry>=3){imgFallback(my);return} // streaming unusable here: native <img>
+    const myCtrl=ctrl=new AbortController(); // keep our own handle: a newer conn() overwrites ctrl
+    let buf=new Uint8Array(0),need=-1;const dec=new TextDecoder();const p0=paintCount;
     try{
-      const res=await fetch(url+(url.indexOf('?')<0?'?':'&')+'r='+my,{signal:ctrl.signal,cache:'no-store'});
+      const res=await fetch(url+(url.indexOf('?')<0?'?':'&')+'r='+my,{signal:myCtrl.signal,cache:'no-store'});
       if(!res.ok||!res.body)throw 0;
-      last=Date.now();
+      last=Date.now();retry=500;          // connected: reset backoff (don't wait on the first frame)
       const rd=res.body.getReader();
       for(;;){
         const st=await rd.read();
-        if(st.done||my!==gen||!want)break;
+        if(st.done||my!==gen||!want){try{myCtrl.abort()}catch(e){}break} // release our own reader
         const v=st.value,nb=new Uint8Array(buf.length+v.length);nb.set(buf);nb.set(v,buf.length);buf=nb;
         for(;;){                          // drain every complete part now buffered
           if(need<0){const h=idx4(buf);if(h<0)break;const m=/content-length:\s*(\d+)/i.exec(dec.decode(buf.subarray(0,h)));if(!m)throw 0;need=+m[1];buf=buf.subarray(h+4)}
           if(buf.length<need)break;
           show(buf.subarray(0,need));
-          buf=buf.subarray(need);need=-1;last=Date.now();retry=500; // healthy frame: reset backoff
+          buf=buf.subarray(need);need=-1;
         }
       }
     }catch(e){}
+    dry=(paintCount>p0)?0:dry+1;          // a connection that never painted counts toward <img> fallback
     if(my===gen&&want&&!document.hidden)schedule();
   }
   function schedule(){const t=retry;retry=Math.min(retry*2,5000);setTimeout(()=>{if(want&&!document.hidden)conn()},t)}
-  function watch(){if(want&&!document.hidden&&ctrl&&Date.now()-last>stallMs)ctrl.abort()} // stall -> reconnect via catch
-  function start(){if(want)return;want=true;retry=500;last=Date.now();if(!wd)wd=setInterval(watch,1000);conn()}
+  function watch(){if(want&&!document.hidden&&!imgMode&&ctrl&&Date.now()-last>stallMs)ctrl.abort()} // stall -> reconnect via catch
+  function start(){if(want)return;want=true;retry=500;dry=0;imgMode=false;last=Date.now();if(!wd)wd=setInterval(watch,1000);conn()}
   function stop(){want=false;gen++;if(ctrl)ctrl.abort();if(wd){clearInterval(wd);wd=null}blank()}
   // On hide: drop the connection (frees the device's viewer slot) but KEEP the
   // last frame on screen. Browsers freeze/discard hidden tabs, and if our JS
@@ -211,7 +232,7 @@ window.mjpegStream=function(img,url,opts){
   // stream that then refreshes on reconnect.
   document.addEventListener('visibilitychange',()=>{
     if(document.hidden){gen++;if(ctrl)ctrl.abort()}
-    else if(want){retry=500;last=Date.now();conn()}
+    else if(want){retry=500;dry=0;imgMode=false;last=Date.now();conn()}
   });
   return {start,stop};
 };
