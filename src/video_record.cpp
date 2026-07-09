@@ -1712,8 +1712,17 @@ void videoStart() {
   // stay latched forever. Deliver the missed wakeup.
   if (trigPending) xTaskNotifyGive(tVideoRec);
   if (motPrev != NULL) {
-    // Priority 1: motion checks only ever use otherwise-idle cycles.
-    xTaskCreatePinnedToCore(videoMotionTask, "video_motion", 6144, NULL, 1, &tVideoMotion, 0);
+    // Priority 1: motion checks only ever use otherwise-idle cycles. Pinned to
+    // core 1 (APP_CPU), NOT core 0: on core 0 it is the lowest-priority task
+    // under the stream sender (streamCB, 5) + audio (4), so an active live
+    // stream starved it and the debug overlay froze mid-scene. Core 1 hosts
+    // only camCB (5, blocked on sensor DMA ~70% of each frame) and the WebServer
+    // tick (mjpegCB, 5, sleeps between 8ms handles) + the delay(100) Arduino
+    // loop, so there is ample idle time here EVEN while core 0 streams — the
+    // overlay now refreshes in real time regardless of viewers. Cross-core safe:
+    // ring access is under the videoMux portMUX spinlock and esp_jpg_decode runs
+    // on per-call local state with its own output buffers (motCur/motPrev).
+    xTaskCreatePinnedToCore(videoMotionTask, "video_motion", 6144, NULL, 1, &tVideoMotion, 1);
   }
 }
 
