@@ -138,11 +138,21 @@ window.EventPlot=function(host,opts){
 // watchdog aborts + reconnects (with backoff) if no frame lands within stallMs -
 // so a dropped/stalled stream self-heals instead of hanging. Pauses while the tab
 // is hidden (frees the device's one viewer slot) and resumes on return.
-// Returns {start,stop}. opts:{stallMs}.
+// Returns {start,stop}. opts:{stallMs,canvas}.
 window.mjpegStream=function(img,url,opts){
   opts=opts||{};
   const stallMs=opts.stallMs||4000;
   let want=false,ctrl=null,curUrl=null,busy=false,busyAt=0,last=0,retry=500,wd=null,gen=0,dry=0,paintCount=0,imgMode=false;
+  // Prefer decoding into a <canvas> (opts.canvas + createImageBitmap): swapping
+  // blob URLs into an <img> at stream rate trips WebKit quirks - under memory
+  // pressure iOS silently stops rendering (and firing onload for) blob <img>
+  // swaps, a black stream only a page refresh fixed. A canvas draw has no async
+  // element lifecycle to lose: decode resolved -> we draw -> that IS the paint,
+  // and a frame that fails to decode is skipped, never half-rendered gray.
+  const cv=(opts.canvas&&typeof createImageBitmap==='function')?opts.canvas:null;
+  // Streaming paints go to the canvas, the native fallback needs the <img>; only
+  // one is visible at a time ('' defers to the page stylesheet's display).
+  function showEl(el){if(!cv)return;cv.style.display=(el===cv)?'':'none';img.style.display=(el===cv)?'none':''}
   // Reading a fetch response BODY as a stream is unsupported on older iOS Safari;
   // detect it so we can fall back to a native <img> instead of looping on a null body.
   const canStream=(typeof ReadableStream!=='undefined')&&('body' in Response.prototype);
@@ -156,6 +166,16 @@ window.mjpegStream=function(img,url,opts){
     // forever; after 2s assume that decode is lost and advance to a fresh frame.
     if(busy&&Date.now()-busyAt<2000)return;
     busy=true;busyAt=Date.now();
+    if(cv){
+      createImageBitmap(new Blob([bytes],{type:'image/jpeg'})).then(bm=>{
+        if(cv.width!==bm.width||cv.height!==bm.height){cv.width=bm.width;cv.height=bm.height}
+        cv.getContext('2d').drawImage(bm,0,0);
+        if(bm.close)bm.close();
+        showEl(cv);
+        paintCount++;last=Date.now();busy=false;
+      }).catch(()=>{busy=false}); // undecodable (corrupt) frame: skip it
+      return;
+    }
     const prev=curUrl;
     curUrl=URL.createObjectURL(new Blob([bytes],{type:'image/jpeg'}));
     // last is stamped on PAINT (here), NOT on parse below, so the stall watchdog
@@ -164,7 +184,7 @@ window.mjpegStream=function(img,url,opts){
     img.onload=done;img.onerror=done;
     img.src=curUrl;
   }
-  function blank(){img.onload=img.onerror=null;busy=false;img.removeAttribute('src');if(curUrl){URL.revokeObjectURL(curUrl);curUrl=null}}
+  function blank(){img.onload=img.onerror=null;busy=false;img.removeAttribute('src');if(curUrl){URL.revokeObjectURL(curUrl);curUrl=null}if(cv)cv.getContext('2d').clearRect(0,0,cv.width,cv.height)}
   // Native <img> multipart stream: no fetch, no decode gate. It can't self-heal a
   // server-side drop (the reason mjpegStream exists) - the device drops any client
   // that can't drain a frame in 800ms (e.g. an iPhone in WiFi power-save), and the
@@ -173,7 +193,7 @@ window.mjpegStream=function(img,url,opts){
   // regardless - a probe either upgrades back to the self-healing fetch reader or,
   // still dry, re-falls-back on a FRESH native connection (restarting the stream).
   function imgFallback(my){
-    imgMode=true;busy=false;img.onload=null;
+    imgMode=true;busy=false;img.onload=null;showEl(img);
     img.onerror=()=>{if(my===gen&&want&&!document.hidden){img.onerror=null;retry=500;dry=0;imgMode=false;last=Date.now();conn()}};
     img.src=url+(url.indexOf('?')<0?'?':'&')+'r='+my;
     last=Date.now();

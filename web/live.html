@@ -11,7 +11,7 @@ body{margin:0 auto;padding:16px;max-width:760px;background:#14171c;color:#dde3ea
 #bar span.cur{background:#1d2229;color:#dde3ea}
 #bar button{margin-left:auto}
 button{background:#3d9df0;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:.95em;cursor:pointer}
-img{width:100%;display:block;border-radius:10px;background:#000;min-height:120px}
+img,#camcv{width:100%;display:block;border-radius:10px;background:#000;min-height:120px}
 @media(max-width:600px){
   body{padding:10px}
   #bar{gap:4px}#bar b{width:100%;margin:0 0 2px}
@@ -25,14 +25,17 @@ img{width:100%;display:block;border-radius:10px;background:#000;min-height:120px
 </div>
 <div style="position:relative">
   <img id="cam" alt="live stream">
+  <canvas id="camcv" style="display:none"></canvas>
   <canvas id="mot" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;display:none"></canvas>
 </div>
 <script src="/ui.js"></script>
 <script>
 // Robust MJPEG: reads the stream via fetch() and auto-reconnects on stall/drop
-// (a bare <img> would freeze on a half-decoded frame forever). Self-pauses while
-// the tab is hidden; audio keeps playing.
-const camStream=mjpegStream(cam,"/mjpeg/1");camStream.start();
+// (a bare <img> would freeze on a half-decoded frame forever). Frames paint into
+// #camcv via createImageBitmap where supported - blob-URL <img> swaps silently
+// stop rendering on iOS under memory pressure. Self-pauses while the tab is
+// hidden; audio keeps playing.
+const camStream=mjpegStream(cam,"/mjpeg/1",{canvas:camcv});camStream.start();
 setInterval(()=>{
   if(document.hidden)return;
   fetch("/camera/status").then(r=>r.json()).then(s=>{
@@ -50,7 +53,9 @@ function drawMot(m){
   if(m.map){_motMap=m.map;_motMapAt=Date.now()}
   else if(_motMap&&Date.now()-_motMapAt<3000)m.map=_motMap;
   mot.style.display="block";
-  mot.width=cam.clientWidth;mot.height=cam.clientHeight;
+  // Size from the wrapper, not #cam: the stream may be painting into #camcv
+  // with the <img> hidden (clientWidth 0).
+  mot.width=mot.parentNode.clientWidth;mot.height=mot.parentNode.clientHeight;
   const ctx=mot.getContext("2d");
   ctx.clearRect(0,0,mot.width,mot.height);
   ctx.font="13px monospace";
