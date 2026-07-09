@@ -495,10 +495,14 @@ void handleJPGSstream(void) {
 // in well under the deadline on a LAN). But a half-open / wedged client never
 // drains: WiFiClient::write would then block ~10s (10 retries x 1s select),
 // stalling EVERY other viewer. Here we cap the total push at STREAM_SEND_DEADLINE_MS
-// and bail, so one stuck viewer is dropped in <1s instead of jamming the stream.
+// and bail, so one stuck viewer is dropped promptly instead of jamming the stream.
 // Returns true only if the WHOLE frame went out (a partial frame would desync the
 // multipart boundary, so the caller drops the client on false).
-#define STREAM_SEND_DEADLINE_MS 800
+// 1500ms (was 800): a phone in WiFi power-save takes normal sub-second latency
+// bursts, and at 800ms every burst severed the stream mid-frame - the iPhone live
+// view reconnected every few seconds. 1500ms rides out a typical DTIM sleep while
+// still reaping a genuinely wedged client fast enough for the other viewers.
+#define STREAM_SEND_DEADLINE_MS 1500
 static bool streamSendFrame(int fd, const char *buf, size_t len) {
   if (fd < 0) return false;
   size_t sent = 0;
