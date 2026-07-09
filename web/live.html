@@ -62,19 +62,27 @@ function drawMot(m){
       if(bit(m.mask,b))ctx.fillRect((b%m.bx)*bw,((b/m.bx)|0)*bh,bw,bh);
   }
   if(!m.map){ctx.fillStyle="#8a94a0";ctx.fillText("motion: warming up",10,20);return}
-  ctx.fillStyle="rgba(240,93,93,.22)";ctx.strokeStyle="rgba(240,93,93,.85)";ctx.lineWidth=2;
-  for(let b=0;b<m.bx*m.by;b++){
-    if(bit(m.map,b)){
-      const x=(b%m.bx)*bw,y=((b/m.bx)|0)*bh;
-      ctx.fillRect(x,y,bw,bh);ctx.strokeRect(x,y,bw,bh);
+  // Only paint the red "changing now" blocks while the map is CURRENT. Analysis
+  // is the lowest-priority task and starves while the live stream runs, so the
+  // device keeps returning the last map - painting those blocks made a single
+  // motion event linger red for many seconds ("stuck for a minute"). A stale map
+  // shows the mask + "Ns ago" only, so red always means live motion.
+  if(m.age_ms<1500){
+    ctx.fillStyle="rgba(240,93,93,.22)";ctx.strokeStyle="rgba(240,93,93,.85)";ctx.lineWidth=2;
+    for(let b=0;b<m.bx*m.by;b++){
+      if(bit(m.map,b)){
+        const x=(b%m.bx)*bw,y=((b/m.bx)|0)*bh;
+        ctx.fillRect(x,y,bw,bh);ctx.strokeRect(x,y,bw,bh);
+      }
     }
   }
-  ctx.fillStyle=m.global?"#f0c95d":m.level>=m.thresh?"#f05d5d":"#5df0a0";
-  // The device sends the LAST map with its age instead of blanking a stale one
-  // (analysis slips under streaming load); report staleness rather than flap.
+  // Stale = detection paused (streaming starves it): show gray + "paused Ns ago"
+  // so a frozen level reading isn't mistaken for live.
+  const stale=m.age_ms>1500;
+  ctx.fillStyle=stale?"#8a94a0":m.global?"#f0c95d":m.level>=m.thresh?"#f05d5d":"#5df0a0";
   ctx.fillText("motion "+m.level+"/"+m.thresh+(m.global?" lighting change":"")
     +(m.enabled?"":" (trigger off)")
-    +(m.age_ms>3000?" · "+Math.round(m.age_ms/1000)+"s ago":""),10,20);
+    +(stale?" · paused "+Math.round(m.age_ms/1000)+"s ago":""),10,20);
 }
 async function motPoll(){
   if(document.hidden)return;
