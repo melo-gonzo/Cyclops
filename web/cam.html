@@ -65,8 +65,8 @@ body.viewer #vbadge{display:inline-block}
     <input type="range" id="mot_blocks" min="1" max="192" oninput="lbl(this)" onchange="motSend('motion_blocks='+this.value)"><input type="number" id="mot_blocks_v" onchange="numIn(this)"></div>
   <div class="ctl"><label title="avg luma delta for a block to count as changed; lower = more sensitive">pixel diff</label>
     <input type="range" id="mot_diff" min="3" max="60" oninput="lbl(this)" onchange="motSend('motion_diff='+this.value)"><input type="number" id="mot_diff_v" onchange="numIn(this)"></div>
-  <div class="ctl"><label title="after a trigger, ignore new triggers for this many seconds (motion is still graphed; only repeat triggers are suppressed). 0 = no limit">trigger cooldown</label>
-    <input type="range" id="mot_cd" min="0" max="60" oninput="lbl(this)" onchange="motSend('motion_cooldown='+this.value)"><input type="number" id="mot_cd_v" onchange="numIn(this)"><span class="note">s</span></div>
+  <div class="ctl"><label title="after a trigger, ignore new triggers for this many seconds (motion is still graphed; only repeat triggers are suppressed). 0 = no limit">trigger cooldown (s)</label>
+    <input type="range" id="mot_cd" min="0" max="60" oninput="lbl(this)" onchange="motSend('motion_cooldown='+this.value)"><input type="number" id="mot_cd_v" onchange="numIn(this)"></div>
   <div class="note" style="line-height:1.6;margin-top:8px">
     Every 0.5s each block's average brightness is compared against the previous check.<br>
     <b>grid</b> &mdash; how finely the frame is split into blocks (across&times;down shown at right). Finer pinpoints motion better but each block averages fewer pixels, so it reads noisier.<br>
@@ -235,7 +235,7 @@ setInterval(()=>{ // fps poll only: must not yank controls mid-adjustment
 // overlay canvas takes clicks and toggles the block under the cursor in
 // the exclusion mask. Everything hides if this board has no video module
 // (endpoint 404s).
-let _motMiss=0,_lastMot=null,_motTick=0,_motMap=null,_motMapAt=0;
+let _lastMot=null,_motTick=0;
 const _mbit=(hex,b)=>(parseInt(hex.substr((b>>3)*2,2),16)>>(b&7))&1;
 function drawMot(m){
   const pv=document.getElementById("pv"),mot=document.getElementById("mot");
@@ -244,10 +244,6 @@ function drawMot(m){
   const ctx=mot.getContext("2d");
   ctx.clearRect(0,0,mot.width,mot.height);
   ctx.font="13px monospace";
-  // Hold the last good map briefly so a missed analysis slot under streaming
-  // load doesn't flicker the overlay to "warming up".
-  if(m.map){_motMap=m.map;_motMapAt=Date.now()}
-  else if(_motMap&&Date.now()-_motMapAt<3000)m.map=_motMap;
   if(!m.bx){ctx.fillStyle="#8a94a0";ctx.fillText("motion: warming up",10,20);return}
   const bw=mot.width/m.bx,bh=mot.height/m.by;
   if(document.getElementById("mot_edit").checked){ // block boundaries
@@ -271,8 +267,11 @@ function drawMot(m){
     }
   }
   ctx.fillStyle=m.global?"#f0c95d":m.level>=m.thresh?"#f05d5d":"#5df0a0";
+  // The device sends the LAST map with its age instead of blanking a stale one
+  // (analysis slips under streaming load); report staleness rather than flap.
   ctx.fillText("motion "+m.level+"/"+m.thresh+(m.global?" lighting change":"")
-    +(m.enabled?"":" (trigger off)"),10,20);
+    +(m.enabled?"":" (trigger off)")
+    +(m.age_ms>3000?" · "+Math.round(m.age_ms/1000)+"s ago":""),10,20);
 }
 function motSync(m){
   document.getElementById("motcard").style.display="";
@@ -301,20 +300,23 @@ function motPoll(){
   // overlay off: keep a slow poll so the tuning card stays live
   if(!on){mot.style.display="none";if(_motTick++%4)return}
   fetch("/video/motion").then(r=>{
-    if(!r.ok)throw 0;
-    return r.json();
-  }).then(m=>{
-    if(_paint&&_lastMot)m.mask=_lastMot.mask; // mid-stroke: keep local edits
-    _lastMot=m;_motMiss=0;
-    motSync(m);
-    if(on)drawMot(m);
-  }).catch(()=>{
-    if(++_motMiss>2){
+    // Hide the motion UI only when the feature genuinely doesn't exist (404 on
+    // a video-less board). A busy device (streaming contention) 503s or drops
+    // polls in bursts - that used to count as 3 misses and VANISH the card.
+    if(r.status==404){
       document.getElementById("motwrap").style.display="none";
       document.getElementById("motcard").style.display="none";
       mot.style.display="none";
+      return null;
     }
-  });
+    return r.ok?r.json():null;
+  }).then(m=>{
+    if(!m)return; // busy poll: keep the last drawn state
+    if(_paint&&_lastMot)m.mask=_lastMot.mask; // mid-stroke: keep local edits
+    _lastMot=m;
+    motSync(m);
+    if(on)drawMot(m);
+  }).catch(()=>{});
 }
 function motSend(q){fetch("/video/config?"+q).then(r=>{
   if(!r.ok)return r.text().then(t=>alert(t));

@@ -1381,17 +1381,18 @@ static void handleVideoMotion() {
 
   bool analyzing = motPrev != NULL && videoEnabled && vring != NULL;
   // The analysis task is priority 1 on core 0; an active live stream (priority
-  // 5, same core) starves it, so checks can slip well past one MOT_CHECK_MS.
-  // A 2s window blanked the map under that load and the overlay flickered to
-  // "warming up". 5s tolerates several missed slices - the map is at most a
-  // few seconds stale, which is fine for a debug overlay.
-  bool fresh = r.ts != 0 && millis() - r.ts < 5000;
+  // 5, same core) starves it, so checks can slip well past one MOT_CHECK_MS -
+  // with one slow phone viewer attached ~40% of polls used to catch the map
+  // >5s stale. Blanking it then made the overlay flap between the live map and
+  // "warming up", so instead we ALWAYS send the last map (as long as its grid
+  // still applies) plus its age_ms, and the overlay reports staleness honestly.
+  // "fresh" (<5s) is kept for the level/trigger fields shown as live numbers.
+  bool haveMap = r.ts != 0 && r.bx == motW / motBlockSz && r.by == motH / motBlockSz;
+  bool fresh = haveMap && millis() - r.ts < 5000;
   map[0] = 0;
-  if (fresh && r.bx == motW / motBlockSz && r.by == motH / motBlockSz) {
+  if (haveMap) {
     int bytes = (r.bx * r.by + 7) / 8;
     for (int i = 0; i < bytes; i++) sprintf(map + i * 2, "%02x", r.map[i]);
-  } else {
-    fresh = false; // grid just changed; last map doesn't apply
   }
   // bx/by/mask reflect the current grid even while maps warm up, so the
   // mask editor works immediately
@@ -1401,14 +1402,16 @@ static void handleVideoMotion() {
   maskHex[maskBytes * 2] = 0;
 
   snprintf(json, sizeof(json),
-           "{\"enabled\":%s,\"analyzing\":%s,\"fresh\":%s,\"bx\":%u,\"by\":%u,"
+           "{\"enabled\":%s,\"analyzing\":%s,\"fresh\":%s,\"age_ms\":%lu,\"bx\":%u,\"by\":%u,"
            "\"blk\":%u,\"level\":%d,\"thresh\":%u,\"diff\":%u,\"cooldown\":%u,\"global\":%s,"
            "\"luma\":%u,\"avg_diff\":%u,\"map\":\"%s\",\"mask\":\"%s\"}",
            motionEnabled ? "true" : "false", analyzing ? "true" : "false",
-           fresh ? "true" : "false", bx, by, motBlockSz, fresh ? r.level : 0,
+           fresh ? "true" : "false",
+           haveMap ? (unsigned long)(millis() - r.ts) : 0UL, bx, by, motBlockSz,
+           haveMap ? r.level : 0,
            motionBlocks, motionDiff, motCooldownMs / 1000,
-           fresh && r.global ? "true" : "false", fresh ? r.luma : 0,
-           fresh ? r.avgDiff : 0, map, maskHex);
+           haveMap && r.global ? "true" : "false", haveMap ? r.luma : 0,
+           haveMap ? r.avgDiff : 0, map, maskHex);
   videoServer->send(200, "application/json", json);
 }
 

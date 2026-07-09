@@ -45,13 +45,7 @@ setInterval(()=>{
 // Motion debug overlay: poll the detector's changed-block map and paint it
 // over the stream. Polling itself keeps analysis alive on the device, so
 // this works even with auto-trigger off. Hidden if the board lacks video.
-let _motMiss=0,_motMap=null,_motMapAt=0;
 function drawMot(m){
-  // The device's analysis task can briefly miss its slot under streaming load,
-  // returning an empty map for a poll or two. Reuse the last good map for a
-  // short grace period so the overlay doesn't flicker to "warming up".
-  if(m.map){_motMap=m.map;_motMapAt=Date.now()}
-  else if(_motMap&&Date.now()-_motMapAt<3000)m.map=_motMap;
   mot.style.display="block";
   // Size from the wrapper, not #cam: the stream may be painting into #camcv
   // with the <img> hidden (clientWidth 0).
@@ -76,17 +70,24 @@ function drawMot(m){
     }
   }
   ctx.fillStyle=m.global?"#f0c95d":m.level>=m.thresh?"#f05d5d":"#5df0a0";
+  // The device sends the LAST map with its age instead of blanking a stale one
+  // (analysis slips under streaming load); report staleness rather than flap.
   ctx.fillText("motion "+m.level+"/"+m.thresh+(m.global?" lighting change":"")
-    +(m.enabled?"":" (trigger off)"),10,20);
+    +(m.enabled?"":" (trigger off)")
+    +(m.age_ms>3000?" · "+Math.round(m.age_ms/1000)+"s ago":""),10,20);
 }
 async function motPoll(){
   if(document.hidden)return;
   if(!moton.checked){mot.style.display="none";return}
   try{
     const r=await fetch("/video/motion");
-    if(!r.ok)throw 0;
-    drawMot(await r.json());_motMiss=0;
-  }catch(e){if(++_motMiss>2){motwrap.style.display="none";mot.style.display="none"}}
+    // 404 = no video on this board: hide the toggle. A busy device (streaming
+    // contention) drops polls in bursts - keep the last drawn overlay instead
+    // of miscounting that as "feature missing" and vanishing the checkbox.
+    if(r.status==404){motwrap.style.display="none";mot.style.display="none";return}
+    if(!r.ok)return;
+    drawMot(await r.json());
+  }catch(e){}
 }
 setInterval(motPoll,500);
 </script>
