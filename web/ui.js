@@ -166,10 +166,15 @@ window.mjpegStream=function(img,url,opts){
   }
   function blank(){img.onload=img.onerror=null;busy=false;img.removeAttribute('src');if(curUrl){URL.revokeObjectURL(curUrl);curUrl=null}}
   // Native <img> multipart stream: no fetch, no decode gate. It can't self-heal a
-  // server-side drop (the reason mjpegStream exists), so it's only used where the
-  // streaming reader is unavailable or keeps failing; start()/tab-return re-probe.
+  // server-side drop (the reason mjpegStream exists) - the device drops any client
+  // that can't drain a frame in 800ms (e.g. an iPhone in WiFi power-save), and the
+  // <img> then freezes on a half-decoded gray frame. So imgMode is NEVER terminal:
+  // onerror re-probes the streaming reader at once, and watch() re-probes every 10s
+  // regardless - a probe either upgrades back to the self-healing fetch reader or,
+  // still dry, re-falls-back on a FRESH native connection (restarting the stream).
   function imgFallback(my){
-    imgMode=true;busy=false;img.onload=img.onerror=null;
+    imgMode=true;busy=false;img.onload=null;
+    img.onerror=()=>{if(my===gen&&want&&!document.hidden){img.onerror=null;retry=500;dry=0;imgMode=false;last=Date.now();conn()}};
     img.src=url+(url.indexOf('?')<0?'?':'&')+'r='+my;
     last=Date.now();
   }
@@ -202,7 +207,14 @@ window.mjpegStream=function(img,url,opts){
     if(my===gen&&want&&!document.hidden)schedule();
   }
   function schedule(){const t=retry;retry=Math.min(retry*2,5000);setTimeout(()=>{if(want&&!document.hidden)conn()},t)}
-  function watch(){if(want&&!document.hidden&&!imgMode&&ctrl&&Date.now()-last>stallMs)ctrl.abort()}
+  function watch(){
+    if(!want||document.hidden)return;
+    // In imgMode `last` marks the fallback start: after 10s retry streaming (which
+    // ends in a fresh imgFallback if still dry). Skipped where fetch-streaming
+    // doesn't exist at all - restarting a HEALTHY native stream would flicker.
+    if(imgMode){if(canStream&&Date.now()-last>10000){retry=500;dry=0;imgMode=false;conn()}return}
+    if(ctrl&&Date.now()-last>stallMs)ctrl.abort();
+  }
   function start(){if(want)return;want=true;retry=500;dry=0;imgMode=false;last=Date.now();if(!wd)wd=setInterval(watch,1000);conn()}
   function stop(){want=false;gen++;if(ctrl)ctrl.abort();if(wd){clearInterval(wd);wd=null}blank()}
   // On hide: drop the connection (frees the device's viewer slot) but KEEP the
