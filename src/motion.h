@@ -18,6 +18,8 @@ struct Result {
   int active;           // unmasked blocks considered
   uint32_t diffSum;     // total abs luma delta over the WHOLE frame (incl. masked)
   uint32_t activeDiffSum; // abs luma delta over UNMASKED blocks only (for avg stat)
+  uint32_t changedDiffSum; // abs luma delta over CHANGED blocks only (for the
+                           // "avg diff across changed blocks" debug readout)
   int bx, by;           // grid dimensions actually used
 };
 
@@ -29,7 +31,7 @@ struct Result {
 inline Result blockDiff(const uint8_t *cur, const uint8_t *prev, int mw, int mh,
                         int blk, uint32_t diffThresh, const uint8_t *mask,
                         uint8_t *outMap, size_t mapBytes) {
-  Result r = {0, 0, 0, 0, 0, 0};
+  Result r = {0, 0, 0, 0, 0, 0, 0};
   if (!cur || !prev || blk <= 0 || mw <= 0 || mh <= 0) return r;
   r.bx = mw / blk;
   r.by = mh / blk;
@@ -58,11 +60,39 @@ inline Result blockDiff(const uint8_t *cur, const uint8_t *prev, int mw, int mh,
       r.activeDiffSum += diff; // unmasked only -> the "avg motion" stat ignores masked regions
       if (diff / blkPx >= diffThresh) {
         r.changed++;
+        r.changedDiffSum += diff; // changed-only -> "avg diff across changed blocks"
         if (outMap && byteIdx < mapBytes) outMap[byteIdx] |= 1 << (bit & 7);
       }
     }
   }
   return r;
+}
+
+// Remap a block-exclusion mask from an old obx*oby grid to a new nbx*nby grid
+// so a saved mask survives a grid-fineness or framesize change instead of being
+// wiped. Nearest-neighbour: each new block samples the old block covering its
+// centre (integer math, no FP). Bit layout matches blockDiff's outMap
+// (bit j*bx+i, LSB-first bytes). out is fully rewritten and may be a separate
+// buffer; degenerate/oversized grids clear it. Sizes clamped to mapBytes.
+inline void interpolateMask(const uint8_t *oldMask, int obx, int oby,
+                            uint8_t *out, int nbx, int nby, size_t mapBytes) {
+  if (!out) return;
+  memset(out, 0, mapBytes);
+  if (!oldMask || obx <= 0 || oby <= 0 || nbx <= 0 || nby <= 0) return;
+  for (int nj = 0; nj < nby; nj++) {
+    int oj = ((2 * nj + 1) * oby) / (2 * nby); // centre of new row in old rows
+    if (oj >= oby) oj = oby - 1;
+    for (int ni = 0; ni < nbx; ni++) {
+      int oi = ((2 * ni + 1) * obx) / (2 * nbx);
+      if (oi >= obx) oi = obx - 1;
+      int obit = oj * obx + oi;
+      size_t obyte = (size_t)(obit >> 3);
+      if (obyte >= mapBytes || !(oldMask[obyte] & (1 << (obit & 7)))) continue;
+      int nbit = nj * nbx + ni;
+      size_t nbyte = (size_t)(nbit >> 3);
+      if (nbyte < mapBytes) out[nbyte] |= 1 << (nbit & 7);
+    }
+  }
 }
 
 // A scene-wide delta (> pct% of active blocks changed) is lighting/AEC, not

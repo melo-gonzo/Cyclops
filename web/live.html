@@ -80,7 +80,8 @@ function drawMot(m){
   // so a frozen level reading isn't mistaken for live.
   const stale=m.age_ms>1500;
   ctx.fillStyle=stale?"#8a94a0":m.global?"#f0c95d":m.level>=m.thresh?"#f05d5d":"#5df0a0";
-  ctx.fillText("motion "+m.level+"/"+m.thresh+(m.global?" lighting change":"")
+  ctx.fillText("motion "+m.level+"/"+m.thresh
+    +(!stale?" · diff "+m.chg_diff:"")+(m.global?" lighting change":"")
     +(m.enabled?"":" (trigger off)")
     +(stale?" · paused "+Math.round(m.age_ms/1000)+"s ago":""),10,20);
 }

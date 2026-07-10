@@ -190,6 +190,7 @@ struct MotRec {
   bool     global; // scene-wide delta (lighting), excluded from triggering
   uint8_t  luma;   // mean frame luma (low light tanks the OV2640 frame rate)
   uint8_t  avgDiff; // mean per-pixel abs luma delta across the frame
+  uint8_t  chgDiff; // mean per-pixel abs luma delta over CHANGED blocks only
   uint8_t  map[MOT_MAP_BYTES]; // bit j*bx+i set = block (i,j) changed
 };
 static MotRec motNow;          // guarded by videoMux
@@ -221,8 +222,9 @@ static uint32_t motEvtWr = 0, motEvtCnt = 0, motEvtNextId = 1;
 
 // User-drawn exclusion mask: bit j*bx+i set = block (i,j) never counts as
 // motion (swaying trees, a TV, ...). Edited by clicking blocks on the
-// /camera preview overlay. Persisted in NVS together with the grid dims it
-// was drawn for; a resolution change clears it (the blocks don't map over).
+// /camera preview overlay. Persisted in NVS together with the grid dims it was
+// drawn for; a grid or resolution change remaps it (interpolateMask) so the
+// exclusion zone survives.
 static uint8_t motMask[MOT_MAP_BYTES]; // guarded by videoMux
 
 static WebServer *videoServer = NULL;
@@ -252,11 +254,19 @@ static void loadVidSettings() {
   motCooldownMs = p.getUInt("mot_cd", motCooldownMs);
   uint8_t bsz = p.getUChar("mot_bsz", motBlockSz);
   if (bsz == 2 || bsz == 4 || bsz == 8 || bsz == 16) motBlockSz = bsz;
-  // Mask only applies if it was drawn for the current grid
+  // Restore the mask, remapping it if it was drawn for a different grid (a
+  // grid-fineness or framesize change since it was saved) so an exclusion zone
+  // survives across those changes instead of being silently dropped.
   uint8_t gx = (uint8_t)((vidW / 8) / motBlockSz);
   uint8_t gy = (uint8_t)((vidH / 8) / motBlockSz);
-  if (p.getUChar("mot_mask_bx", 0) == gx && p.getUChar("mot_mask_by", 0) == gy) {
-    p.getBytes("mot_mask", motMask, MOT_MAP_BYTES);
+  uint8_t mbx = p.getUChar("mot_mask_bx", 0), mby = p.getUChar("mot_mask_by", 0);
+  if (mbx > 0 && mby > 0) {
+    static uint8_t stored[MOT_MAP_BYTES];
+    p.getBytes("mot_mask", stored, MOT_MAP_BYTES);
+    if (mbx == gx && mby == gy)
+      memcpy(motMask, stored, MOT_MAP_BYTES);
+    else
+      motion::interpolateMask(stored, mbx, mby, motMask, gx, gy, MOT_MAP_BYTES);
   }
   p.end();
 }
@@ -1053,6 +1063,11 @@ static void videoMotionTask(void *pvParameters) {
       // every block is masked.
       uint32_t activePx = (uint32_t)active * blk * blk;
       uint32_t avg = activePx ? mr.activeDiffSum / activePx : 0;
+      // Mean per-pixel delta over the CHANGED blocks only (the ones drawn red):
+      // "how hard is the motion where it's happening", vs avg which dilutes it
+      // over the whole scene. 0 when nothing changed.
+      uint32_t changedPx = (uint32_t)changed * blk * blk;
+      uint32_t chgAvg = changedPx ? mr.changedDiffSum / changedPx : 0;
       portENTER_CRITICAL(&videoMux);
       motNow.ts = millis();
       motNow.level = changed;
@@ -1061,6 +1076,7 @@ static void videoMotionTask(void *pvParameters) {
       motNow.global = global;
       motNow.luma = (uint8_t)(lumaSum / ((uint32_t)mw * mh));
       motNow.avgDiff = (uint8_t)(avg > 255 ? 255 : avg);
+      motNow.chgDiff = (uint8_t)(chgAvg > 255 ? 255 : chgAvg);
       memcpy(motNow.map, map, MOT_MAP_BYTES);
       if (motHist != NULL) {
         motHist[motHistWrite] = motNow;
@@ -1312,9 +1328,15 @@ static void handleVideoConfig() {
       return;
     }
     if ((uint8_t)v != motBlockSz) {
+      static uint8_t oldm[MOT_MAP_BYTES]; // single-threaded web handler
       portENTER_CRITICAL(&videoMux);
+      memcpy(oldm, motMask, MOT_MAP_BYTES);
+      int obx = motW / motBlockSz, oby = motH / motBlockSz;
       motBlockSz = (uint8_t)v;
-      memset((void *)motMask, 0, MOT_MAP_BYTES); // mask blocks don't map over
+      // Remap the mask onto the new grid so a painted exclusion zone survives a
+      // fineness change instead of being wiped.
+      motion::interpolateMask(oldm, obx, oby, motMask,
+                              motW / motBlockSz, motH / motBlockSz, MOT_MAP_BYTES);
       portEXIT_CRITICAL(&videoMux);
     }
   }
@@ -1404,14 +1426,14 @@ static void handleVideoMotion() {
   snprintf(json, sizeof(json),
            "{\"enabled\":%s,\"analyzing\":%s,\"fresh\":%s,\"age_ms\":%lu,\"bx\":%u,\"by\":%u,"
            "\"blk\":%u,\"level\":%d,\"thresh\":%u,\"diff\":%u,\"cooldown\":%u,\"global\":%s,"
-           "\"luma\":%u,\"avg_diff\":%u,\"map\":\"%s\",\"mask\":\"%s\"}",
+           "\"luma\":%u,\"avg_diff\":%u,\"chg_diff\":%u,\"map\":\"%s\",\"mask\":\"%s\"}",
            motionEnabled ? "true" : "false", analyzing ? "true" : "false",
            fresh ? "true" : "false",
            haveMap ? (unsigned long)(millis() - r.ts) : 0UL, bx, by, motBlockSz,
            haveMap ? r.level : 0,
            motionBlocks, motionDiff, motCooldownMs / 1000,
            haveMap && r.global ? "true" : "false", haveMap ? r.luma : 0,
-           haveMap ? r.avgDiff : 0, map, maskHex);
+           haveMap ? r.avgDiff : 0, haveMap ? r.chgDiff : 0, map, maskHex);
   videoServer->send(200, "application/json", json);
 }
 
@@ -1643,13 +1665,19 @@ bool videoInit(uint16_t w, uint16_t h) {
 
 bool videoSetDims(uint16_t w, uint16_t h) {
   if (recActive || trigPending) return false;
+  static uint8_t oldm[MOT_MAP_BYTES]; // single-threaded (web/config path)
   portENTER_CRITICAL(&videoMux);
+  int obx = motW / motBlockSz, oby = motH / motBlockSz; // grid before the change
+  memcpy(oldm, motMask, MOT_MAP_BYTES);
   vidW = w;
   vidH = h;
   motW = w / 8;
   motH = h / 8;
   motPrimed = false; // previous 1/8-scale frame has the old dimensions
-  memset((void *)motMask, 0, MOT_MAP_BYTES); // mask blocks don't map to a new grid
+  // Remap the mask onto the new (resolution-derived) grid so it survives a
+  // framesize change instead of being wiped.
+  motion::interpolateMask(oldm, obx, oby, motMask,
+                          motW / motBlockSz, motH / motBlockSz, MOT_MAP_BYTES);
   vqTail = 0;
   vqCount = 0;
   vWriteOff = 0;
