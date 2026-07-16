@@ -19,7 +19,10 @@
 
 #pragma once
 
-#if defined(CAMERA_MODEL_XIAO_ESP32S3)
+// Gate on the SD capability, not the board: continuous recording needs a card,
+// nothing XIAO-specific (the P4-NANO's SDMMC slot qualifies too).
+#include "capabilities.h"
+#if HAS_SD
 #include <WebServer.h>
 
 // Load settings from NVS, apply them to the writers, and start the pruner.

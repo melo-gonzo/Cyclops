@@ -16,6 +16,8 @@
 // provided by audio_capture.cpp (XIAO) or board_stubs.cpp (no-audio boards).
 
 #include "video_record.h"
+#include <WiFi.h>       // WiFiClient for raw binary responses (arduino 3.x no
+                        // longer provides it transitively via WebServer.h)
 #include "audio_capture.h"
 #include "clip_index.h" // in-RAM /clips index: video list + cap never scan the card
 #include "ota_update.h" // otaActive(): pause recorder/motion tasks while firmware flashes

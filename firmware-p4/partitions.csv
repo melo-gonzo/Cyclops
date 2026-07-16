@@ -1,0 +1,13 @@
+# Cyclops P4 partition table — dual-OTA, fleet convention (app0/app1 + otadata
+# so OTA updates flip slots; a failed flash falls back to the other slot).
+# NVS stays at the original offset/size so onboarding/settings survive this
+# table change and every future OTA. Apps need 64K alignment: otadata+phy sit
+# in the 0xF000..0x12000 gap, first app starts at 0x20000. 16MB flash:
+# 2 x 3MB app slots + ~9.9MB spiffs.
+# Name,    Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000
+otadata,  data, ota,     0xF000,   0x2000
+phy_init, data, phy,     0x11000,  0x1000
+app0,     app,  ota_0,   0x20000,  0x300000
+app1,     app,  ota_1,   0x320000, 0x300000
+spiffs,   data, spiffs,  0x620000, 0x9E0000

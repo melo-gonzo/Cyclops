@@ -1,0 +1,55 @@
+# Combined-build sdkconfig for the Cyclops P4 firmware.
+# Phase 2a: minimal — let arduino's main() drive setup()/loop(), keep PSRAM on.
+# Camera (CSI/ISP/JPEG/OV5647) options are added in Phase 2b.
+CONFIG_AUTOSTART_ARDUINO=y
+
+# arduino-esp32 requires a 1000 Hz FreeRTOS tick (matches the fleet build).
+CONFIG_FREERTOS_HZ=1000
+
+# arduino's NetworkClientSecure/ssl_client.cpp compiles its ENTIRE body inside
+# the #else of a PSK-ciphersuites check (its default sdkconfig enables PSK; bare
+# IDF doesn't). Without these, the object builds empty and anything touching
+# HTTPClient links with undefined ssl_client symbols.
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# FAT long filenames (IDF defaults to 8.3-only; arduino's prebuilt libs enable
+# LFN). Every Cyclops clip name — cont_00000_v.avi, vclip_*.avi, clip_*.wav —
+# exceeds 8.3, so without this every clip fopen fails while mkdir/mount work.
+CONFIG_FATFS_LFN_HEAP=y
+
+# This build registers more virtual filesystems than IDF's default table holds
+# (console/UART, lwip sockets, FAT/SD, the esp_video device nodes, esp-hosted's
+# eventfd). At 8, whoever registers LAST gets ESP_ERR_NO_MEM: the SD mount
+# failed quietly, or lwip aborted the boot, depending on init order.
+CONFIG_VFS_MAX_COUNT=16
+
+# 32MB PSRAM on the P4-Nano (HEX / 200MHz). Keep it enabled in the combined build.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+
+# Console/log on UART0 (the CH343 bridge); no USB-CDC on this board.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# --- Camera pipeline (Phase 2b): OV5647 MIPI-CSI via esp_video ---
+# Sensor RAW8 (Bayer) -> ISP (debayer/AWB/AE) -> HW JPEG encoder. The OV5647
+# driver auto-detects over the MIPI interface; default format RAW8 800x800@50.
+CONFIG_CAMERA_OV5647=y
+CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_ENC_VIDEO_DEVICE=y
+
+# Chip revision. This Waveshare P4-NANO has a rev-1.x P4 (getChipRevision()=103,
+# esptool "v1.3"), but the pioarduino board default is REV_MIN_301 — a 3.x-ONLY
+# image. Per IDF's Kconfig, P4 rev <3.0 and >=3.0 have "huge hardware
+# differences" and mutually-exclusive memory maps: rev<3 uses the sram_low/high
+# split, rev>=3 uses a unified sram_seg. The 301 default made memory.ld use
+# sram_seg while sections.ld (generated for rev<3) used sram_low/high — the
+# link-time 'sram_low not declared' / undefined _bss_start mismatch. Selecting
+# the rev-1.x target makes BOTH fragments use the split map, matching this
+# silicon. REV_MIN_100 = min v1.0 (supports our v1.03); SELECTS_REV_LESS_V3 is
+# the gate the rev<3 REV_MIN options depend on.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y

@@ -1,6 +1,7 @@
 // cont_record.cpp - see cont_record.h
 
-#if defined(CAMERA_MODEL_XIAO_ESP32S3)
+#include "capabilities.h" // HAS_SD gate (any board with a card records)
+#if HAS_SD
 
 #include "cont_record.h"
 #include "web_assets.gen.h"
@@ -58,7 +59,9 @@ static void contSave() {
 }
 
 static void contApply() {
+#if HAS_AUDIO
   audioContSet(cAudOn, cSegS * 1000);
+#endif
   videoContSet(cVidOn, cSegS * 1000);
 }
 
@@ -137,7 +140,12 @@ static void handleStatus() {
   j += ",\"seg_s\":"; j += String(cSegS);
   j += ",\"keep_min\":"; j += String(cKeepMin);
   j += ",\"keep_mb\":"; j += String(cKeepMb);
+#if HAS_AUDIO
   j += ',' + audioContJson();
+#else
+  // Same keys audioContJson emits, pinned off: no mic on this board.
+  j += ",\"a_on\":false,\"a_rec\":false,\"a_file\":0,\"a_sd\":true";
+#endif
   j += ',' + videoContJson();
   j += ",\"sd\":"; j += sdIsAvailable() ? "true" : "false";
   j += ",\"used_mb\":"; j += String(cUsedKb / 1024);
@@ -241,4 +249,4 @@ void contRegisterEndpoints(WebServer &server) {
   server.on("/rec/clear", HTTP_GET, handleClear);
 }
 
-#endif // CAMERA_MODEL_XIAO_ESP32S3
+#endif // HAS_SD

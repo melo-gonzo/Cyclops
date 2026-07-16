@@ -1,6 +1,8 @@
 // cam_settings.cpp - see cam_settings.h
 
 #include "cam_settings.h"
+
+#if !defined(CAMERA_MODEL_ESP32P4)   // ---- DVP / esp_camera path (S3 + AI-Thinker) ----
 #include "web_assets.gen.h"
 
 #include <Preferences.h>
@@ -332,3 +334,16 @@ void camRegisterEndpoints(WebServer &server) {
   server.on("/camera/config", HTTP_GET, camGuardedW(handleCamConfig));
   server.on("/camera/reset", HTTP_GET, camGuardedW(handleCamReset));
 }
+
+#else  // ---- ESP32-P4 (MIPI-CSI / esp_video) ----
+// The OV5647 runs through esp_video's ISP, not the esp_camera sensor API, so the
+// OV2640-style /camera tuning controls don't apply here. Provide safe stubs so
+// the shared setup + web layer links; V4L2-backed controls can map in later.
+int  camSavedXclkMhz() { return 0; }
+void camSettingsInit() {}
+void camGetFrameDims(uint16_t *w, uint16_t *h) { if (w) *w = 800; if (h) *h = 800; }
+void camRegisterEndpoints(WebServer &server) { (void)server; }
+void camSetFpsSource(float (*fn)()) { (void)fn; }
+void camSetNetFpsSource(float (*fn)()) { (void)fn; }
+
+#endif // CAMERA_MODEL_ESP32P4

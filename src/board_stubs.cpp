@@ -8,7 +8,9 @@
 // detection works while SD-backed clip saving and audio cross-triggering simply
 // do nothing. Compiled only where the audio module is absent.
 
-#if !defined(CAMERA_MODEL_XIAO_ESP32S3)
+// (The ESP32-P4 provides real SD symbols in p4_sd.cpp — SDMMC card — so these
+// stubs compile only where there is genuinely no SD/audio hardware.)
+#if !defined(CAMERA_MODEL_XIAO_ESP32S3) && !defined(CAMERA_MODEL_ESP32P4)
 
 #include "audio_capture.h"
 
@@ -19,4 +21,4 @@ bool sdLowSpace() { return false; }
 void sdNotifyWriteFailed() {}
 uint32_t audioTriggerFromVideo() { return 0; } // no audio to cross-trigger
 
-#endif // !CAMERA_MODEL_XIAO_ESP32S3
+#endif // !CAMERA_MODEL_XIAO_ESP32S3 && !CAMERA_MODEL_ESP32P4

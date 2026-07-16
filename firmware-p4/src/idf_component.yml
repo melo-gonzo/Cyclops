@@ -1,0 +1,18 @@
+# Managed IDF component dependencies.
+# Phase 2b: esp_video is the MIPI-CSI capture stack (pulls esp_cam_sensor for the
+# OV5647 driver + esp_ipa for the ISP image-processing pipeline). Sensor/CSI/ISP/
+# JPEG selection is via sdkconfig (see sdkconfig.defaults).
+dependencies:
+  idf:
+    version: ">=5.3"
+  espressif/esp_video:
+    version: "^2.3.0"
+  # Software tjpgd decoder backing the compat esp_jpg_decode() used by the
+  # shared motion/thumbnail path (esp32-camera registers nothing on esp32p4,
+  # so its conversions API is provided by components/cyclops/compat instead).
+  espressif/esp_jpeg:
+    version: "^1.3.0"
+  # ES8311 codec driver (the NANO's onboard mic + NS4150B speaker amp hang off
+  # it). Control rides the same I2C bus as the camera SCCB (GPIO7/8).
+  espressif/esp_codec_dev:
+    version: "^1.3.0"

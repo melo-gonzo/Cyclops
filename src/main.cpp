@@ -15,29 +15,47 @@
     so N clients share one assembled chunk.
 */
 
-#include "OV2640.h"
+#if defined(CAMERA_MODEL_ESP32P4)
+#include "camera_p4.h"   // MIPI-CSI OV5647 backend (esp_video); OV2640-compatible
+#include "p4_hosted.h"   // C6 co-processor status + firmware update endpoints
+#else
+#include "OV2640.h"      // DVP backend (esp_camera) for the S3/CAM fleet
+#endif
 #include "web_assets.gen.h"
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <esp_idf_version.h>
+#if __has_include(<esp_chip_info.h>)
+#include <esp_chip_info.h> // IDF5 moved esp_chip_info out of esp_system.h
+#endif
 #include <driver/rtc_io.h>
-#include <esp_bt.h>
+#if __has_include(<esp_bt.h>)
+#include <esp_bt.h>   // absent on radio-less chips (ESP32-P4): BT lives on the C6
+#define CYCLOPS_HAS_BT 1
+#else
+#define CYCLOPS_HAS_BT 0
+#endif
 #include <esp_sleep.h>
 #include <esp_wifi.h>
 #include <esp_pm.h>
 #include <esp_timer.h> // boot-guard sentinel (runs outside the blocked task)
-#include "soc/rtc_cntl_reg.h"
+#if __has_include("soc/rtc_cntl_reg.h")
+#include "soc/rtc_cntl_reg.h" // AI-Thinker brownout stopgap; absent on the P4
+#endif
 #include "soc/soc.h"
 #include "lwip/sockets.h" // raw send()/select() for the bounded MJPEG frame write
 
 // Camera model comes from the platformio env build flags
 // (-DCAMERA_MODEL_XIAO_ESP32S3 for the XIAO env); default to AI-Thinker.
-#if !defined(CAMERA_MODEL_XIAO_ESP32S3) && !defined(CAMERA_MODEL_AI_THINKER)
+#if !defined(CAMERA_MODEL_XIAO_ESP32S3) && !defined(CAMERA_MODEL_AI_THINKER) && !defined(CAMERA_MODEL_ESP32P4)
 #define CAMERA_MODEL_AI_THINKER
 #endif
-#include "camera_pins.h"
+#if !defined(CAMERA_MODEL_ESP32P4)
+#include "camera_pins.h"   // DVP pin map (esp_camera); the P4 uses MIPI via camera_p4
+#endif
 // Optional home-WiFi seed. With no wifikeys.h the device boots straight to the
 // fallback AP for onboarding at /wifi (no secrets in source required).
 #if __has_include("wifikeys.h")
@@ -58,6 +76,10 @@ const char *password = "";
 #include "cam_settings.h"
 
 #include "video_record.h"  // motion detector + video recorder run on every board
+#if defined(CAMERA_MODEL_ESP32P4)
+#include "audio_capture.h" // SD API decls (implemented by p4_sd.cpp on this board)
+#include "cont_record.h"   // continuous recording runs here too (HAS_SD=1)
+#endif
 #ifdef CAMERA_MODEL_XIAO_ESP32S3
 #include "audio_capture.h"
 #include "cont_record.h"
@@ -119,7 +141,11 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 unsigned long startTimeAGAIN = 0;
 
 // Hardware objects
+#if defined(CAMERA_MODEL_ESP32P4)
+CameraP4 cam;   // MIPI-CSI OV5647 (esp_video) — same interface camCB uses
+#else
 OV2640 cam;
+#endif
 WebServer server(80);
 static bool cameraOk = false;
 // Master live-stream switch (audio-only mode). When off, /mjpeg/1 and /jpg are
@@ -181,9 +207,11 @@ static const int jpegHeaderLen   = sizeof(JPEG_HEADER) - 1;
  * Disable Bluetooth to free up memory and CPU resources
  */
 void disableBluetoothForPerformance() {
+#if CYCLOPS_HAS_BT
   esp_bt_controller_disable();
   esp_bt_controller_deinit();
   esp_bt_mem_release(ESP_BT_MODE_BTDM);
+#endif // no-op on radio-less chips (P4): nothing to free
 }
 
 /**
@@ -204,7 +232,7 @@ void configurePowerManagement() {
 void scheduledRestart() {
 // AI-Thinker stability hack; on the XIAO it would wipe RAM clips and the
 // 24h amplitude history, and the S3 doesn't need it.
-#ifndef CAMERA_MODEL_XIAO_ESP32S3
+#if !defined(CAMERA_MODEL_XIAO_ESP32S3) && !defined(CAMERA_MODEL_ESP32P4)
   if (millis() - startTimeAGAIN >= RESTART_INTERVAL) {
     Serial.println("Performing scheduled restart for system maintenance...");
     ESP.restart();
@@ -679,7 +707,12 @@ void handleDiag() {
   if (!webAuthOk()) return;
   uint16_t camW, camH;
   camGetFrameDims(&camW, &camH);
+#if defined(CAMERA_MODEL_ESP32P4)
+  int camQuality = 0; // esp_video ISP path — no esp_camera sensor status struct
+#else
   sensor_t *sensor = cameraOk ? esp_camera_sensor_get() : NULL;
+  int camQuality = sensor ? sensor->status.quality : 0;
+#endif
   char json[384];
   snprintf(json, sizeof(json),
            "{\"rssi\":%d,\"ip\":\"%s\",\"uptime_ms\":%lu,"
@@ -695,7 +728,7 @@ void handleDiag() {
            temperatureRead(), // internal die temp, runs ~20-30C above ambient
            cameraMeasuredFps(), streamMeasuredFps(),
            camW, camH,
-           sensor ? sensor->status.quality : 0,
+           camQuality,
            camSavedXclkMhz(), (unsigned long)camStalls,
            liveStreamOn ? "true" : "false"
 #ifdef CAMERA_MODEL_XIAO_ESP32S3
@@ -706,7 +739,7 @@ void handleDiag() {
   );
 
   String out = json;
-#ifdef CAMERA_MODEL_XIAO_ESP32S3
+#if HAS_SD
   // SD diagnostic: connected state + how flaky the card has been this session.
   char sd[112];
   uint32_t since = sdSecsSinceDrop();
@@ -733,7 +766,15 @@ void handleDiag() {
 //   the DVP parallel data lines (D0-D7/PCLK/VSYNC/HREF) are not delivering.
 void handleCameraProbe() {
   if (!webAuthOk()) return;
+#if defined(CAMERA_MODEL_ESP32P4)
+  bool sPresent = cameraOk;                       // OV5647 detected by esp_video
+  int sPID = cameraOk ? 0x5647 : 0, sVER = 0, sMIDH = 0, sMIDL = 0;
+#else
   sensor_t *s = cameraOk ? esp_camera_sensor_get() : NULL;
+  bool sPresent = (s != NULL);
+  int sPID  = s ? s->id.PID  : 0, sVER  = s ? s->id.VER  : 0;
+  int sMIDH = s ? s->id.MIDH : 0, sMIDL = s ? s->id.MIDL : 0;
+#endif
   uint32_t age = camLastFrameMs ? (millis() - camLastFrameMs) : 0;
   char j[288];
   snprintf(j, sizeof(j),
@@ -741,10 +782,10 @@ void handleCameraProbe() {
            "\"midh\":\"0x%02x\",\"midl\":\"0x%02x\",\"sccb_ok\":%s,"
            "\"ever_got_frame\":%s,\"last_frame_age_ms\":%ld,"
            "\"cam_fps\":%.1f,\"cam_stalls\":%lu}",
-           s ? "true" : "false",
-           s ? s->id.PID : 0, s ? s->id.VER : 0,
-           s ? s->id.MIDH : 0, s ? s->id.MIDL : 0,
-           (s && s->id.PID) ? "true" : "false",
+           sPresent ? "true" : "false",
+           sPID, sVER,
+           sMIDH, sMIDL,
+           (sPresent && sPID) ? "true" : "false",
            camLastFrameMs ? "true" : "false",
            camLastFrameMs ? (long)age : -1L,
            cameraMeasuredFps(), (unsigned long)camStalls);
@@ -919,6 +960,9 @@ void mjpegCB(void *pvParameters) {
   camRegisterEndpoints(server);
   wifiPortalRegisterEndpoints(server);
   otaRegisterEndpoints(server); // POST /update firmware upload (both boards)
+#if defined(CAMERA_MODEL_ESP32P4)
+  p4HostedRegisterEndpoints(server); // /c6/version + /c6/update (co-processor fw)
+#endif
   webAuthBegin(server); // collect the Cookie header for remember-me sessions
   server.onNotFound(handleNotFound);
   server.begin();
@@ -1091,10 +1135,17 @@ void setup() {
   configurePowerManagement();
   initializeBufferPool();
 
+
 #ifdef CAMERA_MODEL_XIAO_ESP32S3
   pinMode(RESET_BTN_GPIO, INPUT_PULLUP); // BOOT button for factory-reset hold
 #endif
 
+#if defined(CAMERA_MODEL_ESP32P4)
+  // MIPI-CSI (OV5647) via esp_video — no DVP camera_config_t. camera_p4 owns the
+  // CSI/SCCB/JPEG setup. Camera failure stays non-fatal like the DVP path.
+  cameraOk = cam.begin();
+  if (!cameraOk) Serial.println("WARNING: P4 MIPI camera init failed - continuing without video");
+#else
   camera_config_t config = {}; // zero-init: driver has fields we don't set (e.g. sccb_i2c_port)
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer   = LEDC_TIMER_0;
@@ -1136,6 +1187,7 @@ void setup() {
     sccbDiagnosticScan();
 #endif
   }
+#endif // CAMERA_MODEL_ESP32P4 (DVP init block)
 
   if (cameraOk) {
   delay(100);
@@ -1147,7 +1199,20 @@ void setup() {
   delay(50);
   } // cameraOk
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+  // IDF5 (arduino 3.x / P4): TWDT is a config struct and is usually already
+  // running — reconfigure instead of re-init. Same 45s panic behavior.
+  {
+    esp_task_wdt_config_t wdtCfg = {
+        .timeout_ms = 45000,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    if (esp_task_wdt_reconfigure(&wdtCfg) != ESP_OK) esp_task_wdt_init(&wdtCfg);
+  }
+#else
   esp_task_wdt_init(45, true);
+#endif
   esp_task_wdt_add(NULL);
 
   // Joins the strongest saved network; if none is reachable (or standalone
@@ -1156,6 +1221,7 @@ void setup() {
   if (!wifiPortalConnect()) {
     Serial.println("WiFi: not joined - reachable via the " DEVICE_NAME " access point");
   }
+
 
   // Over-the-air updates: ArduinoOTA push (dev) + HTTP /update (fleet). After
   // WiFi/mDNS are up so the hostname resolves for espota. Works on the AP too.
@@ -1185,6 +1251,9 @@ void setup() {
     Serial.println("WARNING: audio init failed - continuing video-only");
   }
 #endif
+  // (P4: audioInit() above covers it — same audio+SD init path as the XIAO,
+  // with the ES8311/SDMMC backends. Needs CONFIG_VFS_MAX_COUNT raised: IDF's
+  // default 8 VFS slots are exhausted by console+lwip+esp_video+FAT.)
   // Video recorder + motion detector run on EVERY board: motion detection works
   // off the PSRAM frame ring with no SD and feeds the Graphs timeline (M_MOTION).
   // Clip *saving* is skipped without an SD card (all SD paths guard internally).

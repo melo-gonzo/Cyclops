@@ -11,7 +11,10 @@
 // slow attack / faster decay, and only learns from blocks below the trigger
 // threshold so loud events don't drag the floor up.
 
-#if defined(CAMERA_MODEL_XIAO_ESP32S3)
+// Boards with a mic: the XIAO's PDM mic, or the P4-NANO's ES8311 codec. The
+// pipeline (ring, triggers, clips, spectrum, web) is shared; only the capture
+// init + the sample-read call + the SD mount internals differ per board.
+#if defined(CAMERA_MODEL_XIAO_ESP32S3) || defined(CAMERA_MODEL_ESP32P4)
 
 #include "audio_capture.h"
 #include "web_assets.gen.h"
@@ -31,12 +34,16 @@
 #include "ota_update.h"  // otaActive(): pause this task while firmware is flashing
 #include <Preferences.h>
 #include <WiFiClient.h>
-#include <driver/i2s.h>
 #include <math.h>
 #include <FS.h>
 #include <esp_task_wdt.h> // feed the boot WDT during the (bounded) clip scan
-#include <SD.h>
-#include <SPI.h>
+#include <SD.h>           // on the P4 this is the compat alias onto SD_MMC
+#if defined(CAMERA_MODEL_ESP32P4)
+#include "p4_audio.h"     // ES8311 codec capture backend (I2S via esp_codec_dev)
+#else
+#include <driver/i2s.h>   // legacy driver: the XIAO's PDM RX mode
+#include <SPI.h>          // XIAO SD card rides the SPI bus
+#endif
 
 // ---- SD card (XIAO Sense expansion board, SPI CS on GPIO21) ----
 #define SD_CS_PIN        21
@@ -68,9 +75,12 @@
 #define SD_DL_OPEN_LOCK_MS 3000
 
 // ---- Hardware (XIAO ESP32S3 Sense onboard PDM mic) ----
+// The P4-NANO's ES8311 codec backend lives in p4_audio.cpp instead.
+#if !defined(CAMERA_MODEL_ESP32P4)
 #define AUDIO_I2S_PORT   I2S_NUM_0
 #define PDM_CLK_PIN      42
 #define PDM_DATA_PIN     41
+#endif
 
 // ---- Capture format ----
 #define AUDIO_SAMPLE_RATE     16000  // Hz, 16-bit mono
@@ -664,6 +674,20 @@ static int recommendedSlotCount() {
 // fast clock and a conservative fallback for fussy cards. Returns true only
 // with a real card present.
 static bool sdMountOnce(uint32_t settleMs) {
+#if defined(CAMERA_MODEL_ESP32P4)
+  // NANO: SDMMC SLOT-0 IOMUX (pins/LDO/power-pin baked into the esp32p4
+  // variant). `SD` is the compat alias for SD_MMC here, so everything past the
+  // mount (scan, health FSM, clips) is the exact code the XIAO runs.
+  SD.end(); // safe no-op on first call; required for remount
+  delay(settleMs);
+  if (!SD.begin()) {
+    sdMountMhz = 0;
+    return false;
+  }
+  sdMountMhz = 40; // SDMMC default bus clock
+  return SD.cardType() != CARD_NONE;
+}
+#else
   SD.end();  // safe no-op on first call; required for remount
   SPI.end(); // drop the bus so a wedged transaction can't poison the retry
   delay(settleMs);
@@ -683,6 +707,7 @@ static bool sdMountOnce(uint32_t settleMs) {
   }
   return SD.cardType() != CARD_NONE;
 }
+#endif // CAMERA_MODEL_ESP32P4 (SD mount backend)
 
 // ---- Persisted per-clip over-threshold metadata --------------------------
 // The trigger rms/threshold/Hz live in the RAM event log (lost on reboot), so
@@ -1734,10 +1759,16 @@ static void audioTask(void *pvParameters) {
     }
 
     size_t bytesRead = 0;
+#if defined(CAMERA_MODEL_ESP32P4)
+    if (!p4AudioRead(chunk, sizeof(chunk), &bytesRead) || bytesRead == 0) {
+      continue;
+    }
+#else
     if (i2s_read(AUDIO_I2S_PORT, chunk, sizeof(chunk), &bytesRead, portMAX_DELAY) != ESP_OK ||
         bytesRead == 0) {
       continue;
     }
+#endif
     int n = bytesRead / 2;
 
     // One-pole DC blocker (~13Hz cutoff). The PDM mic carries a large,
@@ -2339,6 +2370,16 @@ bool audioInit() {
   eventLog = (ClipEvent *)ps_calloc(EVENT_LOG_SIZE, sizeof(ClipEvent));
   if (eventLog == NULL) Serial.println("[audio] event log alloc failed - plot markers disabled");
 
+#if defined(CAMERA_MODEL_ESP32P4)
+  // ES8311 codec capture (I2S STD via esp_codec_dev) — see p4_audio.cpp.
+  if (!p4AudioInit()) {
+    Serial.println("[audio] ES8311 init failed");
+    return false;
+  }
+  Serial.printf("[audio] ES8311 mic ready: %dHz mono, ring %us, %d clip slots x %us max\n",
+                AUDIO_SAMPLE_RATE, (MAX_CLIP_MS + 1000) / 1000, clipSlotCount,
+                MAX_CLIP_MS / 1000);
+#else
   i2s_config_t i2sConfig = {};
   i2sConfig.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM);
   i2sConfig.sample_rate = AUDIO_SAMPLE_RATE;
@@ -2371,6 +2412,7 @@ bool audioInit() {
   Serial.printf("[audio] PDM mic ready: %dHz mono, ring %us, %d clip slots x %us max\n",
                 AUDIO_SAMPLE_RATE, (MAX_CLIP_MS + 1000) / 1000, clipSlotCount,
                 MAX_CLIP_MS / 1000);
+#endif // CAMERA_MODEL_ESP32P4 (capture backend)
   return true;
 }
 
@@ -3094,4 +3136,4 @@ void audioRegisterEndpoints(WebServer &server) {
   server.on("/sd/delete", HTTP_GET, guardedW(handleSdDelete));
 }
 
-#endif // CAMERA_MODEL_XIAO_ESP32S3
+#endif // CAMERA_MODEL_XIAO_ESP32S3 || CAMERA_MODEL_ESP32P4
