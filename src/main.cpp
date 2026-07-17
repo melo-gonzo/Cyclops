@@ -713,12 +713,14 @@ void handleDiag() {
   sensor_t *sensor = cameraOk ? esp_camera_sensor_get() : NULL;
   int camQuality = sensor ? sensor->status.quality : 0;
 #endif
-  char json[384];
+  uint32_t wifiDropAge = wifiPortalSecsSinceDrop();
+  char json[448];
   snprintf(json, sizeof(json),
            "{\"rssi\":%d,\"ip\":\"%s\",\"uptime_ms\":%lu,"
            "\"free_heap\":%u,\"free_psram\":%u,\"camera\":%s,\"clients\":%u,"
            "\"temp_c\":%.1f,\"fps\":%.1f,\"net_fps\":%.1f,"
            "\"res\":\"%ux%u\",\"quality\":%d,\"xclk\":%d,\"cam_stalls\":%lu,"
+           "\"wifi_drops\":%u,\"wifi_drop_age_s\":%ld,"
            "\"stream_on\":%s%s}",
            WiFi.RSSI(),
            (WiFi.status() == WL_CONNECTED ? WiFi.localIP() : WiFi.softAPIP()).toString().c_str(),
@@ -730,6 +732,8 @@ void handleDiag() {
            camW, camH,
            camQuality,
            camSavedXclkMhz(), (unsigned long)camStalls,
+           (unsigned)wifiPortalDrops(),
+           wifiDropAge == UINT32_MAX ? -1L : (long)wifiDropAge,
            liveStreamOn ? "true" : "false"
 #ifdef CAMERA_MODEL_XIAO_ESP32S3
            , videoThermalPausedNow() ? ",\"thermal_paused\":true" : ",\"thermal_paused\":false"

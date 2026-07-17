@@ -31,6 +31,7 @@ extern const char *password;
 #define BOOT_MAX_ATTEMPTS     4      // bounded so setup() stays under the 45s WDT
 #define FALLBACK_AP_AFTER_MS  45000  // station down this long -> raise the AP
 #define STA_RETRY_PERIOD_MS   60000  // retry saved networks while the AP idles
+#define STA_DOWN_LOG_PERIOD_MS 600000 // outage heartbeat into the dlog ring
 
 static char netSsid[MAX_NETS][33];
 static char netPass[MAX_NETS][65];
@@ -58,6 +59,11 @@ static volatile bool joining = false;
 static char joinMsg[96] = "";
 static uint32_t staLostMs = 0;
 static uint32_t lastStaRetryMs = 0;
+static uint32_t dropCount = 0;      // station-link losses this boot (/diag)
+static uint32_t lastDropMs = 0;     // millis() of the most recent loss
+static uint32_t lastDownLogMs = 0;  // throttles the outage heartbeat
+static int      lastScanNets = -1;  // latest scan result: -1 none yet, <0 scan error,
+                                    // 0 radio ok but silent, >0 nets visible
 
 static WebServer *wifiServer = NULL;
 
@@ -157,13 +163,22 @@ const char *wifiPortalHostname() {
   return deviceHost[0] ? deviceHost : DEVICE_HOST;
 }
 
+// Close out an outage if one was in progress: one line with the total downtime.
+// Every recovery path funnels through here so the marker can't stay stale.
+static void staRecovered() {
+  if (staLostMs)
+    dlog(DLOG_INFO, "wifi recovered after %lus (drop #%lu)",
+         (unsigned long)((millis() - staLostMs) / 1000), (unsigned long)dropCount);
+  staLostMs = 0;
+}
+
 static void onStaUp() {
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_19_5dBm); // max TX power -> fewer retransmits
   // NTP (UTC): gives SD files real mtimes; browser renders local time
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   startMdns();
-  staLostMs = 0;
+  staRecovered();
   bool isStatic = ssid && ssid[0] && WiFi.SSID() == ssid; // static IP only on home net
   Serial.printf("[wifi] connected to \"%s\", IP %s\n",
                 WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
@@ -184,10 +199,12 @@ static void startAp() {
   apUp = WiFi.softAP(WIFI_AP_SSID, apPass);
   if (apUp) {
     startMdns();
-    Serial.printf("[wifi] AP \"%s\" up at http://%s\n",
-                  WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
+    dlog(DLOG_INFO, "AP \"%s\" up at %s", WIFI_AP_SSID,
+         WiFi.softAPIP().toString().c_str());
   } else {
-    Serial.println("[wifi] softAP start FAILED");
+    // The AP needs nothing external, so this failing points at the radio
+    // itself (on the P4: the C6 co-processor / esp-hosted link).
+    dlog(DLOG_ERR, "softAP start FAILED - radio not responding?");
   }
 }
 
@@ -251,6 +268,7 @@ static bool tryKnown() {
   if (snapCount == 0) return false;
 
   int16_t found = WiFi.scanNetworks(); // blocking, ~2-3s
+  lastScanNets = found;
   esp_task_wdt_reset();
 
   int order[MAX_NETS], rssi[MAX_NETS], cand = 0;
@@ -286,6 +304,12 @@ static bool tryKnown() {
 // ---------------- public API ----------------
 
 bool wifiPortalIsAp() { return apUp; }
+
+uint32_t wifiPortalDrops() { return dropCount; }
+
+uint32_t wifiPortalSecsSinceDrop() {
+  return dropCount ? (millis() - lastDropMs) / 1000 : UINT32_MAX;
+}
 
 void wifiPortalFactoryReset() {
   Preferences p;
@@ -390,7 +414,7 @@ void wifiPortalTick() {
   if (standalone) return;
 
   if (WiFi.status() == WL_CONNECTED) {
-    staLostMs = 0;
+    staRecovered();
     // drop a leftover fallback AP once nobody is using it
     if (apUp && WiFi.softAPgetStationNum() == 0) stopAp();
     return;
@@ -399,9 +423,22 @@ void wifiPortalTick() {
   uint32_t now = millis();
   if (staLostMs == 0) {
     staLostMs = now;
-    Serial.println("[wifi] station link lost, reconnecting...");
+    lastDownLogMs = now;
+    lastDropMs = now;
+    dropCount++;
+    dlog(DLOG_WARN, "wifi link lost (drop #%lu this boot) - reconnecting",
+         (unsigned long)dropCount);
     WiFi.reconnect();
     return;
+  }
+  // Outage heartbeat: proves the retry loop is alive and shows what the radio
+  // sees (scan <0 = scan itself failing, 0 = no networks, >0 = APs visible but
+  // unjoinable). Mirrored to SD, so it survives the power cycle that usually
+  // ends these incidents.
+  if (now - lastDownLogMs >= STA_DOWN_LOG_PERIOD_MS) {
+    lastDownLogMs = now;
+    dlog(DLOG_WARN, "wifi still down %lumin (last scan: %d nets)",
+         (unsigned long)((now - staLostMs) / 60000), lastScanNets);
   }
   if (!apUp && now - staLostMs > FALLBACK_AP_AFTER_MS) {
     startAp();

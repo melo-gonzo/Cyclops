@@ -48,6 +48,11 @@ void wifiPortalTick();
 // True while the fallback/standalone AP is broadcasting.
 bool wifiPortalIsAp();
 
+// Station-link drop stats for /diag: losses since boot, and seconds since the
+// most recent one (UINT32_MAX if none) - the sdDrops/sdSecsSinceDrop pattern.
+uint32_t wifiPortalDrops();
+uint32_t wifiPortalSecsSinceDrop();
+
 // Factory reset of all network/auth state: clears saved networks, the AP
 // password, the static-IP octet, standalone mode, and the web-login
 // credentials, and wipes the SDK's cached STA creds. Forces 0 saved networks
