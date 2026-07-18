@@ -4,3 +4,4 @@ dependencies.lock
 sdkconfig
 sdkconfig.old
 sdkconfig.esp32p4cam
+esp32c6-*.bin
